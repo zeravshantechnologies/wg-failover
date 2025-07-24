@@ -1,7 +1,7 @@
 use anyhow::{Context, Result};
 use chrono::Local;
 use clap::Parser;
-use log::{error, info, debug};
+use log::{error, info, debug, warn};
 use std::{thread, time};
 use std::process::exit;
 use std::process::Command;
@@ -167,43 +167,75 @@ fn main() -> Result<()> {
     
     // Main monitoring loop
     loop {
-        // Check connectivity through both interfaces
+        // Log interface status
+        info!("Checking primary interface: {}", args.primary);
         let primary_ok = ping_interface(&args.primary, &args.peer_ip, args.count, args.timeout);
+        info!("Primary interface {} connectivity to {}: {}",
+            args.primary, args.peer_ip, if primary_ok { "OK" } else { "FAIL" });
+        
+        info!("Checking secondary interface: {}", args.secondary);
         let secondary_ok = ping_interface(&args.secondary, &args.peer_ip, args.count, args.timeout);
+        info!("Secondary interface {} connectivity to {}: {}",
+            args.secondary, args.peer_ip, if secondary_ok { "OK" } else { "FAIL" });
         
         // Get current route interface
         let current_iface = get_current_interface(&args.peer_ip);
+        info!("Current route to {} is via interface: {:?}",
+            args.peer_ip, current_iface.as_deref().unwrap_or("unknown"));
         
         match (primary_ok, secondary_ok) {
             (true, _) => {
                 // Primary is up - use it
                 if current_iface.as_deref() != Some(&args.primary) {
                     log_with_timestamp("✅ Primary interface is up. Switching route.");
+                    info!("Switching route for {} to primary interface {}", args.peer_ip, args.primary);
                     if let Err(e) = switch_interface(&args.primary, &args.peer_ip) {
                         error!("Failed to switch to primary interface: {}", e);
+                    } else {
+                        info!("Successfully switched to primary interface");
+                        if let Some(new_iface) = get_current_interface(&args.peer_ip) {
+                            info!("Route to {} now via: {}", args.peer_ip, new_iface);
+                        }
                     }
                 } else {
                     log_with_timestamp("✅ Primary interface is active and working correctly.");
+                    info!("Traffic to {} already routed through primary interface", args.peer_ip);
                 }
             }
             (false, true) => {
                 // Primary is down, secondary is up - use secondary
                 if current_iface.as_deref() != Some(&args.secondary) {
                     log_with_timestamp("⚠️ Primary is down. Switching to secondary interface.");
+                    info!("Switching route for {} to secondary interface {}", args.peer_ip, args.secondary);
                     if let Err(e) = switch_interface(&args.secondary, &args.peer_ip) {
                         error!("Failed to switch to secondary interface: {}", e);
+                    } else {
+                        info!("Successfully switched to secondary interface");
+                        if let Some(new_iface) = get_current_interface(&args.peer_ip) {
+                            info!("Route to {} now via: {}", args.peer_ip, new_iface);
+                        }
                     }
                 } else {
                     log_with_timestamp("✅ Secondary interface is active and working correctly.");
+                    info!("Traffic to {} already routed through secondary interface", args.peer_ip);
                 }
             }
             (false, false) => {
                 log_with_timestamp("❌ Both interfaces are unreachable. Trying to reconnect...");
                 // Try to re-establish connection using last known good interface
-                if let Some(iface) = current_iface {
+                info!("Trying to reconnect using last known good interface");
+                if let Some(iface) = current_iface.clone() {
+                    info!("Attempting reconnect via interface: {}", iface);
                     if let Err(e) = switch_interface(&iface, &args.peer_ip) {
                         error!("Failed to reconnect: {}", e);
+                    } else {
+                        info!("Reconnect attempt completed");
+                        if let Some(new_iface) = get_current_interface(&args.peer_ip) {
+                            info!("Current route to {}: {}", args.peer_ip, new_iface);
+                        }
                     }
+                } else {
+                    warn!("No known good interface available for reconnection");
                 }
             }
         }
