@@ -12,19 +12,19 @@ use std::process::Command;
 #[clap(author, version, about)]
 struct Args {
     /// The IP address or hostname of the WireGuard peer
-    #[clap(short, long)]
+    #[clap(short = 'i', long)]
     peer_ip: String,
 
     /// Primary network interface (e.g., eth0, enp0s31f6)
-    #[clap(short, long)]
+    #[clap(short = 'p', long)]
     primary: String,
 
     /// Secondary network interface (e.g., wlan0, wlp0s20f0u5)
-    #[clap(short, long)]
+    #[clap(short = 's', long)]
     secondary: String,
 
     /// Ping interval in seconds
-    #[clap(short, long, default_value = "30")]
+    #[clap(short = 't', long, default_value = "30")]
     interval: u64,
 
     /// Number of ping attempts
