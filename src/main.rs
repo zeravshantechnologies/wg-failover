@@ -1,28 +1,19 @@
-mod network;
-mod errors;
-
 use anyhow::{Context, Result};
 use chrono::Local;
 use clap::Parser;
-use log::{error, info, debug, warn};
-use network::{get_current_interface, ping_interface, switch_interface, interface_exists,
-               get_interface_addresses, is_wireless_interface, get_wifi_signal_strength, 
-               tcp_connection_test, list_interfaces};
-use std::{fs, path::Path, thread, time};
+use log::{error, info, debug};
+use std::{thread, time};
 use std::process::exit;
+use std::process::Command;
 
 /// WireGuard Failover - A utility for ensuring continuous VPN connectivity
-/// by monitoring multiple network interfaces and switching between them when necessary.
+/// by managing routes to the WireGuard peer
 #[derive(Parser, Debug)]
 #[clap(author, version, about)]
 struct Args {
     /// The IP address or hostname of the WireGuard peer
     #[clap(short, long)]
     peer_ip: String,
-
-    /// The WireGuard interface name (e.g., wg0)
-    #[clap(short, long)]
-    wg_interface: String,
 
     /// Primary network interface (e.g., eth0, enp0s31f6)
     #[clap(short, long)]
@@ -43,185 +34,122 @@ struct Args {
     /// Ping timeout in seconds
     #[clap(short = 'w', long, default_value = "2")]
     timeout: u8,
-    
-    /// Use TCP connection test instead of ping (port 443)
-    #[clap(short = 't', long)]
-    use_tcp: bool,
-}
-
-#[derive(Debug, Clone, PartialEq)]
-enum NetworkStatus {
-    Primary,
-    Secondary,
-    Unavailable,
 }
 
 fn log_with_timestamp(msg: &str) {
     info!("[{}] {}", Local::now().format("%Y-%m-%d %H:%M:%S"), msg);
 }
 
-// Using network module functions now
+/// Check if the given interface can reach the peer via ping
+fn ping_interface(iface: &str, peer_ip: &str, count: u8, timeout: u8) -> bool {
+    debug!("Pinging {} from interface {}", peer_ip, iface);
+    
+    Command::new("ping")
+        .args([
+            "-I", iface,
+            "-c", &count.to_string(),
+            "-W", &timeout.to_string(),
+            peer_ip,
+        ])
+        .output()
+        .map(|o| o.status.success())
+        .unwrap_or(false)
+}
 
-/// Attempts to load a configuration file
-fn load_config_file(config_path: &str) -> Result<Option<Args>> {
-    let path = Path::new(config_path);
-    if !path.exists() {
-        debug!("Config file not found at {}", config_path);
-        return Ok(None);
+/// Get the current interface being used to reach the peer
+fn get_current_interface(peer_ip: &str) -> Option<String> {
+    debug!("Checking current interface used to reach {}", peer_ip);
+    
+    let output = Command::new("ip")
+        .args(["route", "get", peer_ip])
+        .output()
+        .ok()?;
+
+    let route = String::from_utf8_lossy(&output.stdout);
+    for part in route.split_whitespace() {
+        if part == "dev" {
+            return route
+                .split_whitespace()
+                .skip_while(|&x| x != "dev")
+                .nth(1)
+                .map(|s| s.to_string());
+        }
     }
+    None
+}
+
+/// Get the gateway for a specific network interface
+fn get_gateway_for_interface(iface: &str) -> Option<String> {
+    debug!("Looking for gateway for interface {}", iface);
     
-    debug!("Loading config from {}", config_path);
-    let config_str = fs::read_to_string(path)
-        .context(format!("Failed to read config file at {}", config_path))?;
+    let output = Command::new("ip")
+        .args(["route", "show", "default"])
+        .output()
+        .ok()?;
+
+    let routes = String::from_utf8_lossy(&output.stdout);
+    for line in routes.lines() {
+        if line.contains(iface) {
+            let parts: Vec<&str> = line.split_whitespace().collect();
+            if let Some(index) = parts.iter().position(|&x| x == "via") {
+                return parts.get(index + 1).map(|s| s.to_string());
+            }
+        }
+    }
+    None
+}
+
+/// Switch the route to the peer to use the specified interface
+fn switch_interface(iface: &str, peer_ip: &str) -> Result<()> {
+    let gateway = get_gateway_for_interface(iface)
+        .context(format!("Failed to find gateway for {}", iface))?;
     
-    let config: toml::Value = toml::from_str(&config_str)
-        .context("Failed to parse TOML config")?;
+    debug!("Switching route for {} to interface {} via {}", peer_ip, iface, gateway);
+
+    // Delete existing route to the peer
+    let _ = Command::new("ip")
+        .args(["route", "del", peer_ip])
+        .output();
     
-    // Extract values with defaults
-    let peer_ip = config
-        .get("peer")
-        .and_then(|p| p.get("ip"))
-        .and_then(|ip| ip.as_str())
-        .unwrap_or("")
-        .to_string();
-    
-    let wg_interface = config
-        .get("wireguard")
-        .and_then(|w| w.get("interface"))
-        .and_then(|i| i.as_str())
-        .unwrap_or("wg0")
-        .to_string();
-    
-    let primary = config
-        .get("interfaces")
-        .and_then(|i| i.get("primary"))
-        .and_then(|p| p.as_str())
-        .unwrap_or("")
-        .to_string();
-    
-    let secondary = config
-        .get("interfaces")
-        .and_then(|i| i.get("secondary"))
-        .and_then(|s| s.as_str())
-        .unwrap_or("")
-        .to_string();
-    
-    let interval = config
-        .get("monitoring")
-        .and_then(|m| m.get("interval"))
-        .and_then(|i| i.as_integer())
-        .unwrap_or(30) as u64;
-    
-    let count = config
-        .get("peer")
-        .and_then(|p| p.get("count"))
-        .and_then(|c| c.as_integer())
-        .unwrap_or(2) as u8;
-    
-    let timeout = config
-        .get("peer")
-        .and_then(|p| p.get("timeout"))
-        .and_then(|t| t.as_integer())
-        .unwrap_or(2) as u8;
+    // Add new route to the peer
+    Command::new("ip")
+        .args(["route", "add", peer_ip, "via", &gateway, "dev", iface])
+        .output()
+        .context("Failed to add route to peer")?;
         
-    let use_tcp = config
-        .get("monitoring")
-        .and_then(|m| m.get("use_tcp"))
-        .and_then(|t| t.as_bool())
-        .unwrap_or(false);
-    
-    // Validate required fields
-    if peer_ip.is_empty() || primary.is_empty() || secondary.is_empty() {
-        debug!("Config file missing required fields (peer IP, primary or secondary interface)");
-        return Ok(None);
-    }
-    
-    Ok(Some(Args {
-        peer_ip,
-        wg_interface,
-        primary,
-        secondary,
-        interval,
-        count,
-        timeout,
-        use_tcp,
-    }))
+    debug!("Successfully switched route for {} to interface {}", peer_ip, iface);
+    Ok(())
+}
+
+/// Check if a given interface exists
+fn interface_exists(iface: &str) -> bool {
+    Command::new("ip")
+        .args(["link", "show", "dev", iface])
+        .output()
+        .map(|o| o.status.success())
+        .unwrap_or(false)
 }
 
 fn main() -> Result<()> {
-    // Initialize logging with environment variables
+    // Initialize logging
     env_logger::init();
     
-    // Try to load config file first
-    let config_paths = [
-        "/etc/wg-failover/config.toml",
-        "./config.toml",
-    ];
+    // Parse command line arguments
+    let args = Args::parse();
     
-    let mut args = None;
-    for path in &config_paths {
-        if let Ok(Some(config_args)) = load_config_file(path) {
-            info!("Loaded configuration from {}", path);
-            args = Some(config_args);
-            break;
-        }
-    }
-    
-    // If no config file was found or it was invalid, use command line args
-    let args = args.unwrap_or_else(Args::parse);
-    
-    info!("WireGuard Failover Monitor started");
+    info!("WireGuard Failover started");
     info!("Configuration:");
     info!("  Peer IP: {}", args.peer_ip);
-    info!("  WireGuard Interface: {}", args.wg_interface);
     info!("  Primary Interface: {}", args.primary);
     info!("  Secondary Interface: {}", args.secondary);
     info!("  Check Interval: {} seconds", args.interval);
-    info!("  Ping Count: {}", args.count);
-    info!("  Ping Timeout: {} seconds", args.timeout);
-    info!("  Using TCP Test: {}", args.use_tcp);
     
-    // List all available interfaces
-    let available_interfaces = list_interfaces();
-    info!("Available network interfaces:");
-    for iface in &available_interfaces {
-        info!("  - {}", iface);
-    }
-    
-    // Verify selected interfaces are in the list
-    if !available_interfaces.contains(&args.primary) {
-        warn!("Selected primary interface '{}' may not exist", args.primary);
-    }
-    
-    if !available_interfaces.contains(&args.secondary) {
-        warn!("Selected secondary interface '{}' may not exist", args.secondary);
-    }
-    
-    // Check if running as root
-    #[cfg(unix)]
-    if unsafe { libc::geteuid() } != 0 {
-        error!("This program must be run as root. Please use sudo or run as the root user.");
-        exit(1);
-    }
-    
-    // Check if interfaces exist and show information
+    // Verify interfaces exist
     if !interface_exists(&args.primary) {
         return Err(anyhow::anyhow!(
             "Primary interface '{}' not found",
             args.primary
         ));
-    } else {
-        info!("Primary interface {} found", args.primary);
-        if let Some(addrs) = get_interface_addresses(&args.primary).first() {
-            info!("Primary interface IP: {}", addrs);
-        }
-        
-        if is_wireless_interface(&args.primary) {
-            info!("Primary interface is wireless");
-            if let Some(signal) = get_wifi_signal_strength(&args.primary) {
-                info!("Primary interface signal strength: {} dBm", signal);
-            }
-        }
     }
     
     if !interface_exists(&args.secondary) {
@@ -229,120 +157,55 @@ fn main() -> Result<()> {
             "Secondary interface '{}' not found",
             args.secondary
         ));
-    } else {
-        info!("Secondary interface {} found", args.secondary);
-        if let Some(addrs) = get_interface_addresses(&args.secondary).first() {
-            info!("Secondary interface IP: {}", addrs);
-        }
-        
-        if is_wireless_interface(&args.secondary) {
-            info!("Secondary interface is wireless");
-            if let Some(signal) = get_wifi_signal_strength(&args.secondary) {
-                info!("Secondary interface signal strength: {} dBm", signal);
-            }
-        }
     }
     
     // Handle Ctrl+C gracefully
     ctrlc::set_handler(move || {
         info!("Received termination signal. Exiting...");
-        // We could do cleanup here if needed
         exit(0);
     })?;
     
-    let mut last_status = NetworkStatus::Unavailable;
-    
-    // Initial status report
-    info!("Starting network monitoring loop");
-    info!("Press Ctrl+C to exit");
-    
+    // Main monitoring loop
     loop {
-        // Check wireless signal strength periodically
-        if is_wireless_interface(&args.primary) {
-            if let Some(signal) = get_wifi_signal_strength(&args.primary) {
-                debug!("Primary wireless signal strength: {} dBm", signal);
-                if signal < -80 {
-                    warn!("Primary interface has weak signal: {} dBm", signal);
-                }
-            }
-        }
+        // Check connectivity through both interfaces
+        let primary_ok = ping_interface(&args.primary, &args.peer_ip, args.count, args.timeout);
+        let secondary_ok = ping_interface(&args.secondary, &args.peer_ip, args.count, args.timeout);
         
-        if is_wireless_interface(&args.secondary) {
-            if let Some(signal) = get_wifi_signal_strength(&args.secondary) {
-                debug!("Secondary wireless signal strength: {} dBm", signal);
-                if signal < -80 {
-                    warn!("Secondary interface has weak signal: {} dBm", signal);
-                }
-            }
-        }
-    
-        // Use either ping or TCP test depending on configuration
-        let (primary_ok, secondary_ok) = if args.use_tcp {
-            // Use TCP connection test with port 443 (HTTPS)
-            let primary_ok = tcp_connection_test(&args.peer_ip, 443, args.timeout);
-            let secondary_ok = tcp_connection_test(&args.peer_ip, 443, args.timeout);
-            debug!("TCP connection test results: primary={}, secondary={}", primary_ok, secondary_ok);
-            (primary_ok, secondary_ok)
-        } else {
-            // Use traditional ping
-            let primary_ok = ping_interface(&args.primary, &args.peer_ip, args.count, args.timeout);
-            let secondary_ok = ping_interface(&args.secondary, &args.peer_ip, args.count, args.timeout);
-            debug!("Ping test results: primary={}, secondary={}", primary_ok, secondary_ok);
-            (primary_ok, secondary_ok)
-        };
-        
+        // Get current route interface
         let current_iface = get_current_interface(&args.peer_ip);
         
-        let current_status = if primary_ok {
-            NetworkStatus::Primary
-        } else if secondary_ok {
-            NetworkStatus::Secondary
-        } else {
-            NetworkStatus::Unavailable
-        };
-        
-        match (current_status, last_status.clone()) {
-            (NetworkStatus::Primary, status) if status != NetworkStatus::Primary => {
-                log_with_timestamp("✅ Primary interface is up. Switching back.");
-                if let Err(e) = switch_interface(&args.primary, &args.wg_interface) {
-                    error!("Failed to switch to primary interface: {}", e);
-                } else {
-                    last_status = NetworkStatus::Primary;
-                }
-            }
-            (NetworkStatus::Primary, NetworkStatus::Primary) => {
+        match (primary_ok, secondary_ok) {
+            (true, _) => {
+                // Primary is up - use it
                 if current_iface.as_deref() != Some(&args.primary) {
-                    log_with_timestamp("⚠️ Routing inconsistency detected. Fixing primary route.");
-                    if let Err(e) = switch_interface(&args.primary, &args.wg_interface) {
-                        error!("Failed to fix primary route: {}", e);
+                    log_with_timestamp("✅ Primary interface is up. Switching route.");
+                    if let Err(e) = switch_interface(&args.primary, &args.peer_ip) {
+                        error!("Failed to switch to primary interface: {}", e);
                     }
                 } else {
                     log_with_timestamp("✅ Primary interface is active and working correctly.");
                 }
             }
-            (NetworkStatus::Secondary, status) if status != NetworkStatus::Secondary => {
-                log_with_timestamp("⚠️ Primary is down. Switching to secondary interface.");
-                if let Err(e) = switch_interface(&args.secondary, &args.wg_interface) {
-                    error!("Failed to switch to secondary interface: {}", e);
-                } else {
-                    last_status = NetworkStatus::Secondary;
-                }
-            }
-            (NetworkStatus::Secondary, NetworkStatus::Secondary) => {
+            (false, true) => {
+                // Primary is down, secondary is up - use secondary
                 if current_iface.as_deref() != Some(&args.secondary) {
-                    log_with_timestamp("⚠️ Routing inconsistency detected. Fixing secondary route.");
-                    if let Err(e) = switch_interface(&args.secondary, &args.wg_interface) {
-                        error!("Failed to fix secondary route: {}", e);
+                    log_with_timestamp("⚠️ Primary is down. Switching to secondary interface.");
+                    if let Err(e) = switch_interface(&args.secondary, &args.peer_ip) {
+                        error!("Failed to switch to secondary interface: {}", e);
                     }
                 } else {
                     log_with_timestamp("✅ Secondary interface is active and working correctly.");
                 }
             }
-            (NetworkStatus::Unavailable, _) => {
-                log_with_timestamp("❌ Both interfaces are unreachable. WireGuard connectivity lost.");
-                last_status = NetworkStatus::Unavailable;
+            (false, false) => {
+                log_with_timestamp("❌ Both interfaces are unreachable. Trying to reconnect...");
+                // Try to re-establish connection using last known good interface
+                if let Some(iface) = current_iface {
+                    if let Err(e) = switch_interface(&iface, &args.peer_ip) {
+                        error!("Failed to reconnect: {}", e);
+                    }
+                }
             }
-            _ => {}
         }
 
         thread::sleep(time::Duration::from_secs(args.interval));
