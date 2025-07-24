@@ -1,0 +1,52 @@
+# WireGuard Failover Configuration File
+# This file should be placed in /etc/wg-failover/config.toml
+
+# WireGuard peer to monitor
+[peer]
+# IP address or hostname of the WireGuard peer to ping
+ip = "10.0.0.1"
+# Number of ping attempts
+count = 2
+# Ping timeout in seconds
+timeout = 2
+
+# WireGuard interface settings
+[wireguard]
+# Name of the WireGuard interface
+interface = "wg0"
+# Restart method: "nmcli" or "wg-quick"
+restart_method = "nmcli"
+
+# Network interfaces
+[interfaces]
+# Primary network interface (preferred)
+primary = "enp0s31f6"
+# Secondary network interface (fallback)
+secondary = "wlp0s20f0u5"
+
+# Monitoring settings
+[monitoring]
+# Check interval in seconds
+interval = 30
+# Log level: "error", "warn", "info", "debug", "trace"
+log_level = "info"
+# Log file path (leave empty for stdout)
+log_file = "/var/log/wg-failover.log"
+# Use TCP connection test instead of ping
+use_tcp = false
+# TCP port to check if use_tcp is true (default: 443)
+tcp_port = 443
+
+# Notification settings
+[notifications]
+# Enable notifications
+enabled = false
+# Send email on interface switch
+email = false
+# Email settings
+email_to = ""
+email_from = ""
+smtp_server = ""
+smtp_port = 587
+smtp_username = ""
+smtp_password = ""

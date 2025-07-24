@@ -1,0 +1,33 @@
+[Unit]
+Description=WireGuard Failover Service
+Documentation=https://github.com/yourusername/wg-failover
+After=network-online.target NetworkManager.service systemd-networkd.service
+Wants=network-online.target
+ConditionPathExists=/usr/local/bin/wg-failover
+
+[Service]
+Type=simple
+ExecStart=/usr/local/bin/wg-failover --peer-ip %i --wg-interface wg0 --primary eth0 --secondary wlan0
+Restart=on-failure
+RestartSec=10
+StandardOutput=journal
+StandardError=journal
+User=root
+Group=root
+
+# Security hardening
+CapabilityBoundingSet=CAP_NET_ADMIN CAP_NET_RAW
+AmbientCapabilities=CAP_NET_ADMIN CAP_NET_RAW
+ProtectSystem=full
+ProtectHome=true
+PrivateTmp=true
+NoNewPrivileges=true
+
+# Replace eth0, wlan0 with your actual interface names (enp0s31f6, wlp0s20f0u5, etc.)
+# %i is a template parameter to be passed when starting the service
+# Example: systemctl start wg-failover@192.168.1.1.service
+# You can also use a configuration file at /etc/wg-failover/config.toml instead
+
+[Install]
+WantedBy=multi-user.target
+Alias=wireguard-failover.service

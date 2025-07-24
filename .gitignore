@@ -1,0 +1,39 @@
+# Rust build artifacts
+/target/
+
+# Cargo lock file
+Cargo.lock
+
+# Backup files
+**/*.rs.bk
+
+# Compiled object files
+*.o
+*.obj
+
+# IDE and editor files
+.idea/
+.vscode/
+**/*.swp
+**/*.swo
+**/*~
+
+# System files
+.DS_Store
+Thumbs.db
+
+# Generated documentation
+/doc/
+/docs/
+
+# Config files that might contain sensitive information
+/config.prod.toml
+
+# Test files
+/tests/tmp/
+
+# Log files
+*.log
+
+# Compiled binaries
+/wg-failover

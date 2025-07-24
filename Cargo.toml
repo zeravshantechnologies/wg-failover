@@ -1,0 +1,26 @@
+[package]
+name = "wg-failover"
+version = "0.1.0"
+edition = "2021"
+description = "A network failover utility for WireGuard VPN connections"
+authors = ["Network Admin"]
+license = "MIT"
+
+[dependencies]
+chrono = "0.4"
+clap = { version = "4.4", features = ["derive"] }
+log = "0.4"
+env_logger = "0.10"
+anyhow = "1.0"
+thiserror = "1.0"
+ctrlc = "3.4"
+toml = "0.7"
+libc = "0.2"
+
+[dev-dependencies]
+tempfile = "3.8"
+mockall = "0.11"
+
+[[bin]]
+name = "wg-failover"
+path = "src/main.rs"
