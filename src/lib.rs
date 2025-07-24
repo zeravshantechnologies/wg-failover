@@ -11,7 +11,7 @@ pub mod errors;
 pub mod network;
 
 // Re-export commonly used types and functions
-pub use errors::{FailoverError, FailoverResult};
+pub use errors::FailoverError;
 pub use network::{
     get_current_interface,
     get_gateway_for_interface,
