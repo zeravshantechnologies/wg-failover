@@ -41,12 +41,30 @@ struct Args {
 /// Configuration file structure
 #[derive(Debug, Deserialize)]
 struct Config {
-    peer_ip: String,
-    primary: String,
-    secondary: String,
-    interval: Option<u64>,
+    #[serde(rename = "peer")]
+    peer_config: PeerConfig,
+    #[serde(rename = "interfaces")]
+    interface_config: InterfaceConfig,
+    #[serde(rename = "monitoring")]
+    monitoring_config: MonitoringConfig,
+}
+
+#[derive(Debug, Deserialize)]
+struct PeerConfig {
+    ip: String,
     count: Option<u8>,
     timeout: Option<u8>,
+}
+
+#[derive(Debug, Deserialize)]
+struct InterfaceConfig {
+    primary: String,
+    secondary: String,
+}
+
+#[derive(Debug, Deserialize)]
+struct MonitoringConfig {
+    interval: Option<u64>,
 }
 
 fn log_with_timestamp(msg: &str) {
@@ -162,23 +180,29 @@ fn main() -> Result<()> {
         Err(_) => {
             info!("Using CLI arguments");
             Config {
-                peer_ip: args.peer_ip.context("--peer-ip required when no config file is specified")?,
-                primary: args.primary.context("--primary required when no config file is specified")?,
-                secondary: args.secondary.context("--secondary required when no config file is specified")?,
-                interval: Some(args.interval),
-                count: Some(args.count),
-                timeout: Some(args.timeout),
+                peer_config: PeerConfig {
+                    ip: args.peer_ip.context("--peer-ip required when no config file is specified")?,
+                    count: Some(args.count),
+                    timeout: Some(args.timeout),
+                },
+                interface_config: InterfaceConfig {
+                    primary: args.primary.context("--primary required when no config file is specified")?,
+                    secondary: args.secondary.context("--secondary required when no config file is specified")?,
+                },
+                monitoring_config: MonitoringConfig {
+                    interval: Some(args.interval),
+                },
             }
         }
     };
     
     // Extract parameters from config
-    let peer_ip = config.peer_ip;
-    let primary = config.primary;
-    let secondary = config.secondary;
-    let interval = config.interval.unwrap_or(args.interval);
-    let count = config.count.unwrap_or(args.count);
-    let timeout = config.timeout.unwrap_or(args.timeout);
+    let peer_ip = config.peer_config.ip;
+    let primary = config.interface_config.primary;
+    let secondary = config.interface_config.secondary;
+    let interval = config.monitoring_config.interval.unwrap_or(args.interval);
+    let count = config.peer_config.count.unwrap_or(args.count);
+    let timeout = config.peer_config.timeout.unwrap_or(args.timeout);
     
     info!("WireGuard Failover started");
     info!("Configuration:");

@@ -4,7 +4,7 @@
 # WireGuard peer to monitor
 [peer]
 # Public IP address or hostname of the WireGuard peer to ping
-peer_ip = "10.0.0.1"
+ip = "206.189.140.174"
 # Number of ping attempts
 count = 2
 # Ping timeout in seconds
@@ -20,9 +20,9 @@ restart_method = "nmcli"
 # Network interfaces
 [interfaces]
 # Primary network interface (preferred)
-primary = "enp0s31f6"
+primary = "enp10s0"
 # Secondary network interface (fallback)
-secondary = "wlp0s20f0u5"
+secondary = "enp12s0f3u1"
 
 # Monitoring settings
 [monitoring]
