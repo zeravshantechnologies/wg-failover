@@ -11,10 +11,14 @@ ExecStart=/usr/local/bin/wg-failover
 Environment="WG_FAILOVER_CONFIG=/etc/wg-failover/config.toml"
 Restart=on-failure
 RestartSec=10
-StandardOutput=journal
-StandardError=journal
+StandardOutput=file:/var/log/wg-failover.log
+StandardError=file:/var/log/wg-failover.log
 User=root
 Group=root
+# Create log file if it doesn't exist
+ExecStartPre=/bin/sh -c 'touch /var/log/wg-failover.log'
+ExecStartPre=/bin/sh -c 'chown root:root /var/log/wg-failover.log'
+ExecStartPre=/bin/sh -c 'chmod 644 /var/log/wg-failover.log'
 
 # Security hardening
 CapabilityBoundingSet=CAP_NET_ADMIN CAP_NET_RAW
