@@ -3,7 +3,7 @@
 
 # WireGuard peer to monitor
 [peer]
-# IP address or hostname of the WireGuard peer to ping
+# Public IP address or hostname of the WireGuard peer to ping
 peer_ip = "10.0.0.1"
 # Number of ping attempts
 count = 2
