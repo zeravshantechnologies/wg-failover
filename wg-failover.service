@@ -7,7 +7,7 @@ ConditionPathExists=/usr/local/bin/wg-failover
 
 [Service]
 Type=simple
-ExecStart=/usr/local/bin/wg-failover --peer-ip %i --wg-interface wg0 --primary eth0 --secondary wlan0
+ExecStart=/usr/local/bin/wg-failover
 Restart=on-failure
 RestartSec=10
 StandardOutput=journal
@@ -23,10 +23,8 @@ ProtectHome=true
 PrivateTmp=true
 NoNewPrivileges=true
 
-# Replace eth0, wlan0 with your actual interface names (enp0s31f6, wlp0s20f0u5, etc.)
-# %i is a template parameter to be passed when starting the service
-# Example: systemctl start wg-failover@192.168.1.1.service
-# You can also use a configuration file at /etc/wg-failover/config.toml instead
+# The service uses the configuration file at /etc/wg-failover/config.toml
+# Make sure to create and configure this file before starting the service
 
 [Install]
 WantedBy=multi-user.target

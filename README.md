@@ -59,11 +59,15 @@ sudo nano /etc/systemd/system/wg-failover.service
 # Reload systemd
 sudo systemctl daemon-reload
 
-# Start the service with the peer IP address as a parameter
-sudo systemctl start wg-failover@192.168.1.1.service
+# Important: The service requires a configuration file
+# Create a config file if you haven't already
+sudo nano /etc/wg-failover/config.toml
+
+# Start the service (no need for @parameter when using config file)
+sudo systemctl start wg-failover.service
 
 # Enable the service to start on boot
-sudo systemctl enable wg-failover@192.168.1.1.service
+sudo systemctl enable wg-failover.service
 ```
 
 ## Usage
@@ -72,12 +76,15 @@ sudo systemctl enable wg-failover@192.168.1.1.service
 
 ```bash
 # Basic usage
-sudo wg-failover --peer-ip 192.168.1.1 --wg-interface wg0 --primary eth0 --secondary wlan0
+sudo wg-failover --peer-ip 192.168.1.1 --primary eth0 --secondary wlan0
 
 # Full options
+# Example using config file (preferred method)
+sudo wg-failover
+
+# Example using command line parameters (temporary testing only)
 sudo wg-failover \
   --peer-ip 192.168.1.1 \
-  --wg-interface wg0 \
   --primary eth0 \
   --secondary wlan0 \
   --interval 30 \
@@ -87,7 +94,7 @@ sudo wg-failover \
 
 ### Configuration File
 
-You can also use a configuration file at `/etc/wg-failover/config.toml`:
+You must create a configuration file at `/etc/wg-failover/config.toml` before starting the service:
 
 ```toml
 # WireGuard peer to monitor
@@ -112,15 +119,25 @@ interval = 30
 log_level = "info"
 ```
 
-### Command Line Options
+### Configuration Options
 
-- `--peer-ip, -p`: IP address or hostname of the WireGuard peer
-- `--wg-interface, -w`: WireGuard interface name
+You can configure wg-failover either through the config file or command line parameters. For persistent setups, the config file is recommended.
+
+**Config File Options (/etc/wg-failover/config.toml):**
+
+- `--peer-ip, -i`: IP address or hostname of the WireGuard peer
 - `--primary, -p`: Primary network interface
 - `--secondary, -s`: Secondary (fallback) network interface
-- `--interval, -i`: Check interval in seconds (default: 30)
+- `--interval, -t`: Check interval in seconds (default: 30)
 - `--count, -c`: Number of ping attempts (default: 2)
-- `--timeout, -t`: Ping timeout in seconds (default: 2)
+- `--timeout, -w`: Ping timeout in seconds (default: 2)
+
+## Important Notes
+
+1. **Configuration is required**: You must create `/etc/wg-failover/config.toml` before starting the service
+2. **Interface names**: Use `ip link show` to find your actual interface names
+3. **WireGuard interface**: Should match your WireGuard configuration
+4. **Service doesn't use @parameter**: When using the config file, start with `wg-failover.service` without @parameter
 
 ## How It Works
 
