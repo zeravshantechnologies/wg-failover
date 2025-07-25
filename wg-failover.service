@@ -8,6 +8,7 @@ ConditionPathExists=/usr/local/bin/wg-failover
 [Service]
 Type=simple
 ExecStart=/usr/local/bin/wg-failover
+Environment="WG_FAILOVER_CONFIG=/etc/wg-failover/config.toml"
 Restart=on-failure
 RestartSec=10
 StandardOutput=journal

@@ -2,9 +2,11 @@ use anyhow::{Context, Result};
 use chrono::Local;
 use clap::Parser;
 use log::{error, info, debug, warn};
+use serde::Deserialize;
 use std::{thread, time};
 use std::process::exit;
 use std::process::Command;
+use std::env;
 
 /// WireGuard Failover - A utility for ensuring continuous VPN connectivity
 /// by managing routes to the WireGuard peer
@@ -13,15 +15,15 @@ use std::process::Command;
 struct Args {
     /// The IP address or hostname of the WireGuard peer
     #[clap(short = 'i', long)]
-    peer_ip: String,
+    peer_ip: Option<String>,
 
     /// Primary network interface (e.g., eth0, enp0s31f6)
     #[clap(short = 'p', long)]
-    primary: String,
+    primary: Option<String>,
 
     /// Secondary network interface (e.g., wlan0, wlp0s20f0u5)
     #[clap(short = 's', long)]
-    secondary: String,
+    secondary: Option<String>,
 
     /// Ping interval in seconds
     #[clap(short = 't', long, default_value = "30")]
@@ -34,6 +36,17 @@ struct Args {
     /// Ping timeout in seconds
     #[clap(short = 'w', long, default_value = "2")]
     timeout: u8,
+}
+
+/// Configuration file structure
+#[derive(Debug, Deserialize)]
+struct Config {
+    peer_ip: String,
+    primary: String,
+    secondary: String,
+    interval: Option<u64>,
+    count: Option<u8>,
+    timeout: Option<u8>,
 }
 
 fn log_with_timestamp(msg: &str) {
@@ -137,25 +150,55 @@ fn main() -> Result<()> {
     // Parse command line arguments
     let args = Args::parse();
     
+    // Load configuration from environment or CLI
+    let config = match env::var("WG_FAILOVER_CONFIG") {
+        Ok(path) => {
+            info!("Loading configuration from: {}", path);
+            let config_str = std::fs::read_to_string(&path)
+                .context(format!("Failed to read config file: {}", path))?;
+            toml::from_str::<Config>(&config_str)
+                .context("Failed to parse config file")?
+        }
+        Err(_) => {
+            info!("Using CLI arguments");
+            Config {
+                peer_ip: args.peer_ip.context("--peer-ip required when no config file is specified")?,
+                primary: args.primary.context("--primary required when no config file is specified")?,
+                secondary: args.secondary.context("--secondary required when no config file is specified")?,
+                interval: Some(args.interval),
+                count: Some(args.count),
+                timeout: Some(args.timeout),
+            }
+        }
+    };
+    
+    // Extract parameters from config
+    let peer_ip = config.peer_ip;
+    let primary = config.primary;
+    let secondary = config.secondary;
+    let interval = config.interval.unwrap_or(args.interval);
+    let count = config.count.unwrap_or(args.count);
+    let timeout = config.timeout.unwrap_or(args.timeout);
+    
     info!("WireGuard Failover started");
     info!("Configuration:");
-    info!("  Peer IP: {}", args.peer_ip);
-    info!("  Primary Interface: {}", args.primary);
-    info!("  Secondary Interface: {}", args.secondary);
-    info!("  Check Interval: {} seconds", args.interval);
+    info!("  Peer IP: {}", peer_ip);
+    info!("  Primary Interface: {}", primary);
+    info!("  Secondary Interface: {}", secondary);
+    info!("  Check Interval: {} seconds", interval);
     
     // Verify interfaces exist
-    if !interface_exists(&args.primary) {
+    if !interface_exists(&primary) {
         return Err(anyhow::anyhow!(
             "Primary interface '{}' not found",
-            args.primary
+            primary
         ));
     }
     
-    if !interface_exists(&args.secondary) {
+    if !interface_exists(&secondary) {
         return Err(anyhow::anyhow!(
             "Secondary interface '{}' not found",
-            args.secondary
+            secondary
         ));
     }
     
@@ -168,56 +211,56 @@ fn main() -> Result<()> {
     // Main monitoring loop
     loop {
         // Log interface status
-        info!("Checking primary interface: {}", args.primary);
-        let primary_ok = ping_interface(&args.primary, &args.peer_ip, args.count, args.timeout);
+        info!("Checking primary interface: {}", primary);
+        let primary_ok = ping_interface(&primary, &peer_ip, count, timeout);
         info!("Primary interface {} connectivity to {}: {}",
-            args.primary, args.peer_ip, if primary_ok { "OK" } else { "FAIL" });
+            primary, peer_ip, if primary_ok { "OK" } else { "FAIL" });
         
-        info!("Checking secondary interface: {}", args.secondary);
-        let secondary_ok = ping_interface(&args.secondary, &args.peer_ip, args.count, args.timeout);
+        info!("Checking secondary interface: {}", secondary);
+        let secondary_ok = ping_interface(&secondary, &peer_ip, count, timeout);
         info!("Secondary interface {} connectivity to {}: {}",
-            args.secondary, args.peer_ip, if secondary_ok { "OK" } else { "FAIL" });
+            secondary, peer_ip, if secondary_ok { "OK" } else { "FAIL" });
         
         // Get current route interface
-        let current_iface = get_current_interface(&args.peer_ip);
+        let current_iface = get_current_interface(&peer_ip);
         info!("Current route to {} is via interface: {:?}",
-            args.peer_ip, current_iface.as_deref().unwrap_or("unknown"));
+            peer_ip, current_iface.as_deref().unwrap_or("unknown"));
         
         match (primary_ok, secondary_ok) {
             (true, _) => {
                 // Primary is up - use it
-                if current_iface.as_deref() != Some(&args.primary) {
+                if current_iface.as_deref() != Some(&primary) {
                     log_with_timestamp("✅ Primary interface is up. Switching route.");
-                    info!("Switching route for {} to primary interface {}", args.peer_ip, args.primary);
-                    if let Err(e) = switch_interface(&args.primary, &args.peer_ip) {
+                    info!("Switching route for {} to primary interface {}", peer_ip, primary);
+                    if let Err(e) = switch_interface(&primary, &peer_ip) {
                         error!("Failed to switch to primary interface: {}", e);
                     } else {
                         info!("Successfully switched to primary interface");
-                        if let Some(new_iface) = get_current_interface(&args.peer_ip) {
-                            info!("Route to {} now via: {}", args.peer_ip, new_iface);
+                        if let Some(new_iface) = get_current_interface(&peer_ip) {
+                            info!("Route to {} now via: {}", peer_ip, new_iface);
                         }
                     }
                 } else {
                     log_with_timestamp("✅ Primary interface is active and working correctly.");
-                    info!("Traffic to {} already routed through primary interface", args.peer_ip);
+                    info!("Traffic to {} already routed through primary interface", peer_ip);
                 }
             }
             (false, true) => {
                 // Primary is down, secondary is up - use secondary
-                if current_iface.as_deref() != Some(&args.secondary) {
+                if current_iface.as_deref() != Some(&secondary) {
                     log_with_timestamp("⚠️ Primary is down. Switching to secondary interface.");
-                    info!("Switching route for {} to secondary interface {}", args.peer_ip, args.secondary);
-                    if let Err(e) = switch_interface(&args.secondary, &args.peer_ip) {
+                    info!("Switching route for {} to secondary interface {}", peer_ip, secondary);
+                    if let Err(e) = switch_interface(&secondary, &peer_ip) {
                         error!("Failed to switch to secondary interface: {}", e);
                     } else {
                         info!("Successfully switched to secondary interface");
-                        if let Some(new_iface) = get_current_interface(&args.peer_ip) {
-                            info!("Route to {} now via: {}", args.peer_ip, new_iface);
+                        if let Some(new_iface) = get_current_interface(&peer_ip) {
+                            info!("Route to {} now via: {}", peer_ip, new_iface);
                         }
                     }
                 } else {
                     log_with_timestamp("✅ Secondary interface is active and working correctly.");
-                    info!("Traffic to {} already routed through secondary interface", args.peer_ip);
+                    info!("Traffic to {} already routed through secondary interface", peer_ip);
                 }
             }
             (false, false) => {
@@ -226,12 +269,12 @@ fn main() -> Result<()> {
                 info!("Trying to reconnect using last known good interface");
                 if let Some(iface) = current_iface.clone() {
                     info!("Attempting reconnect via interface: {}", iface);
-                    if let Err(e) = switch_interface(&iface, &args.peer_ip) {
+                    if let Err(e) = switch_interface(&iface, &peer_ip) {
                         error!("Failed to reconnect: {}", e);
                     } else {
                         info!("Reconnect attempt completed");
-                        if let Some(new_iface) = get_current_interface(&args.peer_ip) {
-                            info!("Current route to {}: {}", args.peer_ip, new_iface);
+                        if let Some(new_iface) = get_current_interface(&peer_ip) {
+                            info!("Current route to {}: {}", peer_ip, new_iface);
                         }
                     }
                 } else {
@@ -240,6 +283,6 @@ fn main() -> Result<()> {
             }
         }
 
-        thread::sleep(time::Duration::from_secs(args.interval));
+        thread::sleep(time::Duration::from_secs(interval));
     }
 }
