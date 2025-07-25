@@ -9,6 +9,7 @@ ConditionPathExists=/usr/local/bin/wg-failover
 Type=simple
 ExecStart=/usr/local/bin/wg-failover
 Environment="WG_FAILOVER_CONFIG=/etc/wg-failover/config.toml"
+Environment="RUST_LOG=info"
 Restart=on-failure
 RestartSec=10
 StandardOutput=file:/var/log/wg-failover.log
