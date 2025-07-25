@@ -1,7 +1,7 @@
 #!/bin/bash
 
 # WireGuard Failover Installer Script
-# This script installs the WireGuard Failover utility and systemd service
+# This script installs pre-built WireGuard Failover components
 
 set -e
 set -o pipefail
@@ -19,36 +19,25 @@ CONFIG_DIR="/etc/wg-failover"
 CONFIG_PATH="$CONFIG_DIR/config.toml"
 LOG_PATH="/var/log/wg-failover.log"
 
+# Files in current directory
+CURRENT_DIR="$(dirname "$(realpath "$0")")"
+
 # Terminal colors
 RED='\033[0;31m'
 GREEN='\033[0;32m'
 YELLOW='\033[0;33m'
 NC='\033[0m' # No Color
 
-# Function to build the binary
-build_binary() {
-    echo -e "${GREEN}Building wg-failover binary...${NC}"
-    if ! command -v cargo &> /dev/null; then
-        echo -e "${RED}Error: Rust toolchain not found. Please install Rust first.${NC}" >&2
-        echo "You can install Rust by running: curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh" >&2
-        exit 1
-    fi
 
-    cargo build --release
-    if [ $? -ne 0 ]; then
-        echo -e "${RED}Error: Failed to build the binary${NC}" >&2
-        exit 1
-    fi
-}
 
 # Function to install the binary
 install_binary() {
     echo -e "${GREEN}Installing binary to $BINARY_PATH...${NC}"
-    if [ ! -f "target/release/wg-failover" ]; then
-        echo -e "${RED}Error: Binary not found. Build failed?${NC}" >&2
+    if [ ! -f "$CURRENT_DIR/wg-failover" ]; then
+        echo -e "${RED}Error: wg-failover executable not found in current directory${NC}" >&2
         exit 1
     fi
-    cp target/release/wg-failover "$BINARY_PATH"
+    cp "$CURRENT_DIR/wg-failover" "$BINARY_PATH"
     chmod +x "$BINARY_PATH"
     echo -e "${GREEN}Binary installed successfully${NC}"
 }
@@ -56,11 +45,11 @@ install_binary() {
 # Function to install the service file
 install_service() {
     echo -e "${GREEN}Installing systemd service to $SERVICE_PATH...${NC}"
-    if [ ! -f "wg-failover.service" ]; then
-        echo -e "${RED}Error: Service file not found${NC}" >&2
+    if [ ! -f "$CURRENT_DIR/wg-failover.service" ]; then
+        echo -e "${RED}Error: wg-failover.service file not found in current directory${NC}" >&2
         exit 1
     fi
-    cp wg-failover.service "$SERVICE_PATH"
+    cp "$CURRENT_DIR/wg-failover.service" "$SERVICE_PATH"
     systemctl daemon-reload
     echo -e "${GREEN}Service installed successfully${NC}"
 }
@@ -72,11 +61,11 @@ install_config() {
     
     # Only copy the config file if it doesn't exist already
     if [ ! -f "$CONFIG_PATH" ]; then
-        if [ ! -f "config.toml" ]; then
-            echo -e "${RED}Error: Configuration template not found${NC}" >&2
+        if [ ! -f "$CURRENT_DIR/config.toml" ]; then
+            echo -e "${RED}Error: config.toml file not found in current directory${NC}" >&2
             exit 1
         fi
-        cp config.toml "$CONFIG_PATH"
+        cp "$CURRENT_DIR/config.toml" "$CONFIG_PATH"
         echo -e "${GREEN}Default configuration installed. Please edit $CONFIG_PATH to match your setup.${NC}"
     else
         echo -e "${YELLOW}Configuration already exists at $CONFIG_PATH. Not overwriting.${NC}"
@@ -108,28 +97,24 @@ detect_interfaces() {
 install() {
     echo -e "${GREEN}=== Installing WireGuard Failover ===${NC}"
     
-    # Check if we're in the right directory
-    if [ ! -f "Cargo.toml" ] || ! grep -q "wg-failover" "Cargo.toml"; then
-        echo -e "${RED}Error: Please run this script from the project root directory${NC}" >&2
-        exit 1
-    fi
-    
-    # Check for dependencies
+    # Check for required commands
     echo -e "${GREEN}Checking dependencies...${NC}"
-    for cmd in cargo ip systemctl; do
+    for cmd in ip systemctl; do
         if ! command -v $cmd &> /dev/null; then
             echo -e "${RED}Error: Required command '$cmd' not found${NC}" >&2
             echo "Please install the required packages before continuing." >&2
             exit 1
         fi
     done
-    
-    build_binary
     install_binary
     install_service
     install_config
     setup_logging
     detect_interfaces
+
+    # Set correct permissions for config directory
+    chmod 755 "$CONFIG_DIR"
+    chmod 644 "$CONFIG_PATH"
     
     echo ""
     echo -e "${GREEN}=== Installation Complete ===${NC}"
