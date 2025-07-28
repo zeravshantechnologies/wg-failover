@@ -4,7 +4,7 @@
 # WireGuard peer to monitor
 [peer]
 # Public IP address or hostname of the WireGuard peer to ping
-ip = "206.189.140.174"
+ip = "10.0.0.1"
 # Number of ping attempts
 count = 2
 # Ping timeout in seconds
