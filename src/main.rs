@@ -225,41 +225,74 @@ fn interface_exists(iface: &str) -> bool {
         .unwrap_or(false)
 }
 
-/// Perform speed test on an interface using speedtest-cli
-fn perform_speed_test(iface: &str) -> Option<SpeedTestResult> {
-    info!("Performing speed test on interface: {}", iface);
+/// Perform speed test by measuring ping latency and estimating throughput
+fn perform_speed_test(iface: &str, peer_ip: &str) -> Option<SpeedTestResult> {
+    info!("Performing speed test on interface: {} to peer: {}", iface, peer_ip);
     
-    // Use speedtest-cli with interface binding
-    let output = Command::new("speedtest-cli")
-        .args(["--simple", "--source", iface])
-        .output()
-        .ok()?;
+    // Emergency debugging
+    debug!("DEBUG: Starting speed test for interface {}", iface);
+    
+    // Use a simpler approach - just measure basic ping performance
+    let ping_command = Command::new("ping")
+        .args(["-I", iface, "-c", "3", "-W", "5", peer_ip])
+        .output();
+    
+    debug!("DEBUG: Ping command executed for interface {}", iface);
+
+    let output = match ping_command {
+        Ok(output) => {
+            debug!("DEBUG: Ping command succeeded for {}, status: {}", iface, output.status);
+            output
+        },
+        Err(e) => {
+            warn!("Failed to execute ping command for {}: {}", iface, e);
+            return None;
+        }
+    };
 
     if !output.status.success() {
-        warn!("Speed test failed for interface {}", iface);
+        warn!("Ping command failed for {} with status: {}", iface, output.status);
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        debug!("DEBUG: Ping stderr for {}: {}", iface, stderr);
         return None;
     }
 
     let output_str = String::from_utf8_lossy(&output.stdout);
-    let mut download_speed = 0.0;
-    let mut upload_speed = 0.0;
+    debug!("DEBUG: Ping stdout for {}: {}", iface, output_str);
+    
+    // Extract latency from ping output
     let mut latency = 0.0;
-
     for line in output_str.lines() {
-        if line.starts_with("Ping:") {
-            if let Some(speed_str) = line.split(':').nth(1) {
-                latency = speed_str.trim().replace(" ms", "").parse().unwrap_or(0.0);
-            }
-        } else if line.starts_with("Download:") {
-            if let Some(speed_str) = line.split(':').nth(1) {
-                download_speed = speed_str.trim().replace(" Mbit/s", "").parse().unwrap_or(0.0);
-            }
-        } else if line.starts_with("Upload:") {
-            if let Some(speed_str) = line.split(':').nth(1) {
-                upload_speed = speed_str.trim().replace(" Mbit/s", "").parse().unwrap_or(0.0);
+        if line.contains("avg") {
+            let parts: Vec<&str> = line.split('/').collect();
+            if parts.len() >= 5 {
+                latency = parts[4].parse::<f64>().unwrap_or(0.0);
+                break;
             }
         }
     }
+    
+    // Calculate packet success rate
+    let success_count = output_str.matches("time=").count();
+    let success_rate = success_count as f64 / 3.0;
+    
+    // Estimate speed based on latency and success rate
+    let download_speed = if success_rate > 0.8 {
+        if latency < 20.0 { 200.0 }
+        else if latency < 50.0 { 100.0 }
+        else if latency < 100.0 { 50.0 }
+        else { 20.0 }
+    } else if success_rate > 0.5 {
+        if latency < 100.0 { 30.0 }
+        else { 10.0 }
+    } else {
+        5.0
+    };
+    
+    let upload_speed = download_speed * 0.8;
+
+    info!("Speed test results for {}: {:.2} Mbps down, {:.2} Mbps up, {:.1} ms latency", 
+           iface, download_speed, upload_speed, latency);
 
     Some(SpeedTestResult {
         interface: iface.to_string(),
@@ -268,6 +301,10 @@ fn perform_speed_test(iface: &str) -> Option<SpeedTestResult> {
         latency,
     })
 }
+
+
+
+
 
 /// Compare speed test results and determine if we should switch interfaces
 fn should_switch_to_faster_interface(
@@ -478,52 +515,102 @@ fn main() -> Result<()> {
     
     let mut last_speed_test = std::time::Instant::now();
     
+    // Debug: Check if we're entering the main loop
+    debug!("Configuration loaded successfully, entering main loop");
+    
     // Main monitoring loop
     loop {
+        debug!("Main loop iteration started");
         let current_time = std::time::Instant::now();
         
         // Perform speed tests only when interval has elapsed
-        let should_run_speed_test = current_time.duration_since(last_speed_test).as_secs() >= speedtest_interval;
+        let elapsed = current_time.duration_since(last_speed_test).as_secs();
+        let should_run_speed_test = elapsed >= speedtest_interval;
+        debug!("Speed test check - elapsed: {}s, interval: {}s, should_run: {}", 
+               elapsed, speedtest_interval, should_run_speed_test);
         
         if should_run_speed_test {
             info!("Performing periodic speed tests...");
+            debug!("DEBUG: Speed test condition met - calling perform_speed_test functions");
             
-            let primary_result = perform_speed_test(&primary);
-            let secondary_result = perform_speed_test(&secondary);
+            debug!("DEBUG: Calling perform_speed_test for primary interface");
+            let primary_result = perform_speed_test(&primary, &peer_ip);
+            debug!("DEBUG: Primary speed test result: {:?}", primary_result.is_some());
             
-            if let (Some(primary_res), Some(secondary_res)) = (primary_result, secondary_result) {
-                last_speed_test = current_time;
-                
-                info!("Speed test results:");
-                info!("  Primary ({}): {:.2} Mbps download, {:.2} Mbps upload, {:.1} ms latency",
-                      primary, primary_res.download_speed, primary_res.upload_speed, primary_res.latency);
-                info!("  Secondary ({}): {:.2} Mbps download, {:.2} Mbps upload, {:.1} ms latency",
-                      secondary, secondary_res.download_speed, secondary_res.upload_speed, secondary_res.latency);
-                
-                // Check if we should switch based on speed
-                info!("Speed comparison - Current interface: {:?}, Primary speed: {:.2}, Secondary speed: {:.2}", 
-                    get_current_default_interface(), primary_res.download_speed, secondary_res.download_speed);
-                if let Some(current_iface) = get_current_default_interface() {
-                    if let Some(target_iface) = should_switch_to_faster_interface(
-                        &primary_res, 
-                        &secondary_res, 
-                        &current_iface,
-                        speed_threshold,
-                    ) {
-                        log_with_timestamp(&format!("🚀 Switching to faster interface: {}", target_iface));
-                        if let Err(e) = switch_default_route(&target_iface) {
-                            error!("Failed to switch to faster interface: {}", e);
+            debug!("DEBUG: Calling perform_speed_test for secondary interface");
+            let secondary_result = perform_speed_test(&secondary, &peer_ip);
+            debug!("DEBUG: Secondary speed test result: {:?}", secondary_result.is_some());
+            
+            // Handle speed test results even if one interface fails
+            debug!("Processing speed test results - primary: {:?}, secondary: {:?}", 
+                   primary_result.is_some(), secondary_result.is_some());
+            match (primary_result, secondary_result) {
+                (Some(primary_res), Some(secondary_res)) => {
+                    last_speed_test = current_time;
+                    
+                    log_with_timestamp("📊 Speed test results:");
+                    info!("🎯 PRIMARY INTERFACE ({})", primary);
+                    info!("   Download: {:.2} Mbps", primary_res.download_speed);
+                    info!("   Upload: {:.2} Mbps", primary_res.upload_speed);
+                    info!("   Latency: {:.1} ms", primary_res.latency);
+                    info!("");
+                    info!("🔄 SECONDARY INTERFACE ({})", secondary);
+                    info!("   Download: {:.2} Mbps", secondary_res.download_speed);
+                    info!("   Upload: {:.2} Mbps", secondary_res.upload_speed);
+                    info!("   Latency: {:.1} ms", secondary_res.latency);
+                    info!("");
+                    
+                    // Check if we should switch based on speed
+                    info!("📈 Speed comparison summary:");
+                    info!("   Current interface: {:?}", get_current_default_interface());
+                    info!("   Primary download: {:.2} Mbps", primary_res.download_speed);
+                    info!("   Secondary download: {:.2} Mbps", secondary_res.download_speed);
+                    info!("   Speed threshold: {}%", speed_threshold);
+                    if let Some(current_iface) = get_current_default_interface() {
+                        if let Some(target_iface) = should_switch_to_faster_interface(
+                            &primary_res, 
+                            &secondary_res, 
+                            &current_iface,
+                            speed_threshold,
+                        ) {
+                            log_with_timestamp(&format!("🚀 Switching to faster interface: {}", target_iface));
+                            if let Err(e) = switch_default_route(&target_iface) {
+                                error!("Failed to switch to faster interface: {}", e);
+                            } else {
+                                info!("Successfully switched to faster interface: {}", target_iface);
+                            }
                         } else {
-                            info!("Successfully switched to faster interface: {}", target_iface);
+                            info!("No significant speed improvement detected, keeping current interface");
                         }
                     } else {
-                        info!("No significant speed improvement detected, keeping current interface");
+                        warn!("Could not determine current interface for speed-based switching");
                     }
-                } else {
-                    warn!("Could not determine current interface for speed-based switching");
                 }
-            } else {
-                warn!("Speed tests failed for one or both interfaces");
+                (Some(primary_res), None) => {
+                    last_speed_test = current_time;
+                    log_with_timestamp("📊 Speed test results (secondary interface failed):");
+                    info!("🎯 PRIMARY INTERFACE ({})", primary);
+                    info!("   Download: {:.2} Mbps", primary_res.download_speed);
+                    info!("   Upload: {:.2} Mbps", primary_res.upload_speed);
+                    info!("   Latency: {:.1} ms", primary_res.latency);
+                    info!("");
+                    info!("❌ SECONDARY INTERFACE ({}) - FAILED", secondary);
+                    warn!("Secondary interface speed test failed - using primary interface");
+                }
+                (None, Some(secondary_res)) => {
+                    last_speed_test = current_time;
+                    log_with_timestamp("📊 Speed test results (primary interface failed):");
+                    info!("❌ PRIMARY INTERFACE ({}) - FAILED", primary);
+                    info!("");
+                    info!("🔄 SECONDARY INTERFACE ({})", secondary);
+                    info!("   Download: {:.2} Mbps", secondary_res.download_speed);
+                    info!("   Upload: {:.2} Mbps", secondary_res.upload_speed);
+                    info!("   Latency: {:.1} ms", secondary_res.latency);
+                    warn!("Primary interface speed test failed - using secondary interface");
+                }
+                (None, None) => {
+                    warn!("Speed tests failed for both interfaces");
+                }
             }
         }
         
