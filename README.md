@@ -8,16 +8,13 @@ This tool solves the problem of maintaining uninterrupted VPN connectivity when 
 
 ## Features
 
-- Automatic detection of network interface failures
-- Seamless switching between primary and secondary interfaces
-- Support for both NetworkManager and wg-quick setups
-- Non-persistent routing changes (temporary, not persisted through reboots)
-- Command-line interface with configurable parameters
-- Detailed logging for monitoring and troubleshooting
-- Systemd service integration
-- Configuration via config file or command-line parameters
-- WiFi signal strength monitoring
-- TCP connection testing as an alternative to ping
+- **Automatic failover**: Seamless switching between primary and secondary network interfaces
+- **Speed-based optimization**: Periodically tests interface speeds and switches to faster connections
+- **Configurable thresholds**: Set minimum speed improvement percentage before switching
+- **Dual monitoring**: Quick connectivity checks + periodic speed tests
+- **Flexible configuration**: Command-line arguments or configuration file
+- **Detailed logging**: Comprehensive monitoring and troubleshooting
+- **Systemd service integration**: Easy deployment as a system service
 
 ## Installation
 
@@ -25,7 +22,7 @@ This tool solves the problem of maintaining uninterrupted VPN connectivity when 
 
 - Rust toolchain (1.60 or newer)
 - Linux operating system
-- NetworkManager or wg-quick for WireGuard management
+- `speedtest-cli` package for speed testing functionality
 - Root permissions for network changes
 
 ### Building from Source
@@ -38,32 +35,26 @@ cd wg-failover
 # Build the project
 cargo build --release
 
-# Install the binary and associated files
-sudo ./install.sh
-
-# Or manually install just the binary
+# Install the binary
 sudo cp target/release/wg-failover /usr/local/bin/
 ```
 
 ### Systemd Service Setup
 
-The installation script will set up the systemd service automatically. If you need to do it manually:
-
 ```bash
 # Copy the service file
 sudo cp wg-failover.service /etc/systemd/system/
 
-# Edit the service file to use your interfaces
-sudo nano /etc/systemd/system/wg-failover.service
+# Create configuration directory
+sudo mkdir -p /etc/wg-failover
+
+# Create configuration file
+sudo nano /etc/wg-failover/config.toml
 
 # Reload systemd
 sudo systemctl daemon-reload
 
-# Important: The service requires a configuration file
-# Create a config file if you haven't already
-sudo nano /etc/wg-failover/config.toml
-
-# Start the service (no need for @parameter when using config file)
+# Start the service
 sudo systemctl start wg-failover.service
 
 # Enable the service to start on boot
@@ -72,106 +63,142 @@ sudo systemctl enable wg-failover.service
 
 ## Usage
 
-### Command Line
+### Command Line Interface
 
 ```bash
-# Basic usage
-sudo wg-failover --peer-ip 192.168.1.1 --primary eth0 --secondary wlan0
-
-# Full options
-# Example using config file (preferred method)
-sudo wg-failover
-
-# Example using command line parameters (temporary testing only)
+# Basic usage with CLI arguments
 sudo wg-failover \
   --peer-ip 192.168.1.1 \
+  --wg-interface wg0 \
+  --primary eth0 \
+  --secondary wlan0
+
+# Full options with speed testing
+sudo wg-failover \
+  --peer-ip 192.168.1.1 \
+  --wg-interface wg0 \
   --primary eth0 \
   --secondary wlan0 \
   --interval 30 \
   --count 2 \
-  --timeout 2
+  --timeout 2 \
+  --speedtest-interval 3600 \
+  --speed-threshold 35
+
+# Using configuration file
+sudo wg-failover --config /etc/wg-failover/config.toml
+
+# Debug logging
+sudo RUST_LOG=debug wg-failover --config /etc/wg-failover/config.toml
 ```
 
 ### Configuration File
 
-You must create a configuration file at `/etc/wg-failover/config.toml` before starting the service:
+Create `/etc/wg-failover/config.toml`:
 
 ```toml
 # WireGuard peer to monitor
 [peer]
-ip = "10.0.0.1"
+# Public IP address or hostname of the WireGuard peer to ping
+ip = "206.189.140.174"
+# Number of ping attempts
 count = 2
+# Ping timeout in seconds
 timeout = 2
 
 # WireGuard interface settings
 [wireguard]
+# Name of the WireGuard interface
 interface = "wg0"
-restart_method = "nmcli"
 
 # Network interfaces
 [interfaces]
-primary = "enp0s31f6"
-secondary = "wlp0s20f0u5"
+# Primary network interface (preferred)
+primary = "enp2s0f0u2"
+# Secondary network interface (fallback)
+secondary = "enp10s0"
 
 # Monitoring settings
 [monitoring]
+# Connectivity check interval in seconds
 interval = 30
+# Speed test interval in seconds (default: 3600 = 1 hour)
+speedtest_interval = 3600
+# Speed threshold percentage to switch to faster interface (default: 35)
+speed_threshold = 35
+# Log level: "error", "warn", "info", "debug", "trace"
 log_level = "info"
 ```
 
-### Configuration Options
+### Command Line Options
 
-You can configure wg-failover either through the config file or command line parameters. For persistent setups, the config file is recommended.
-
-**Config File Options (/etc/wg-failover/config.toml):**
-
-- `--peer-ip, -i`: IP address or hostname of the WireGuard peer
-- `--primary, -p`: Primary network interface
-- `--secondary, -s`: Secondary (fallback) network interface
-- `--interval, -t`: Check interval in seconds (default: 30)
-- `--count, -c`: Number of ping attempts (default: 2)
-- `--timeout, -w`: Ping timeout in seconds (default: 2)
-
-## Important Notes
-
-1. **Configuration is required**: You must create `/etc/wg-failover/config.toml` before starting the service
-2. **Interface names**: Use `ip link show` to find your actual interface names
-3. **WireGuard interface**: Should match your WireGuard configuration
-4. **Service doesn't use @parameter**: When using the config file, start with `wg-failover.service` without @parameter
+- `--config <CONFIG>`: Path to configuration file
+- `-i, --peer-ip <PEER_IP>`: IP address or hostname of the WireGuard peer
+- `-w, --wg-interface <WG_INTERFACE>`: WireGuard interface name (e.g., wg0)
+- `-p, --primary <PRIMARY>`: Primary network interface (e.g., eth0)
+- `-s, --secondary <SECONDARY>`: Secondary network interface (e.g., wlan0)
+- `-t, --interval <INTERVAL>`: Connectivity check interval in seconds [default: 30]
+- `-n, --count <COUNT>`: Number of ping attempts [default: 2]
+- `--timeout <TIMEOUT>`: Ping timeout in seconds [default: 2]
+- `--speedtest-interval <SPEEDTEST_INTERVAL>`: Speed test interval in seconds [default: 3600]
+- `--speed-threshold <SPEED_THRESHOLD>`: Speed threshold percentage to switch to faster interface [default: 35]
 
 ## How It Works
 
-1. The application continuously monitors connectivity to the specified peer IP
-2. When the primary interface loses connectivity, it:
-   - Removes the current default route
-   - Adds a new default route via the secondary interface
-   - Restarts the WireGuard connection
-3. When the primary interface regains connectivity, it automatically switches back
-4. All changes are temporary and won't persist after a reboot
+### Dual Monitoring System
 
-### Technical Details
+1. **Connectivity Monitoring (Fast)**
+   - Checks interface connectivity every 30 seconds (configurable)
+   - Immediately switches to backup interface if primary fails
+   - Ensures continuous VPN connectivity
 
-- Uses `ip route` commands to modify the routing table
-- Leverages both NetworkManager and wg-quick for managing WireGuard connections
-- Monitors network status using ping or TCP connection tests
-- For wireless interfaces, can monitor signal strength
-- Handles graceful termination via SIGINT (Ctrl+C)
+2. **Speed Optimization (Periodic)**
+   - Performs speed tests every hour (configurable)
+   - Compares download speeds between interfaces
+   - Switches to faster interface if it's at least 35% faster (configurable)
+   - Always prefers primary interface unless secondary is significantly faster
+
+### Operation Modes
+
+- **Failover Mode**: When primary interface loses connectivity, immediately switch to secondary
+- **Speed Optimization Mode**: When both interfaces are active, use the faster one
+- **Auto-recovery**: Automatically switch back to primary when it becomes available and faster
+
+## Configuration Priority
+
+1. Command-line arguments (highest priority)
+2. Configuration file specified with `--config`
+3. Environment variable `WG_FAILOVER_CONFIG`
+4. Default configuration file locations
 
 ## Troubleshooting
 
 ### Common Issues
 
-- **Permission denied**: Make sure to run with `sudo` or as root
+- **Permission denied**: Ensure you're running with `sudo` or as root
 - **Interface not found**: Verify interface names with `ip link show`
-- **WireGuard restart fails**: Check if the WireGuard interface is managed by NetworkManager or wg-quick
-- **No connectivity after switch**: Verify that the gateway was correctly detected
+- **Speed test fails**: Install `speedtest-cli` package
+- **No connectivity after switch**: Check gateway detection and routing tables
 
-### Logging
+### Debug Mode
 
-Enable debug logging by setting the environment variable:
+Enable detailed logging for troubleshooting:
 
 ```bash
-sudo RUST_LOG=debug wg-failover --peer-ip 192.168.1.1 --wg-interface wg0 --primary eth0 --secondary wlan0
+sudo RUST_LOG=debug wg-failover --config /etc/wg-failover/config.toml
+```
+
+### Interface Verification
+
+```bash
+# List available interfaces
+ip link show
+
+# Check current routing
+ip route show
+
+# Test interface connectivity
+ping -I eth0 8.8.8.8
 ```
 
 ## License
@@ -187,3 +214,6 @@ Contributions are welcome! Please feel free to submit a Pull Request.
 3. Commit your changes (`git commit -m 'Add some amazing feature'`)
 4. Push to the branch (`git push origin feature/amazing-feature`)
 5. Open a Pull Request
+```
+
+Now let me check if the code compiles with all the changes:

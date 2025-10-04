@@ -14,20 +14,22 @@ timeout = 2
 [wireguard]
 # Name of the WireGuard interface
 interface = "wg0"
-# Restart method: "nmcli" or "wg-quick"
-restart_method = "nmcli"
 
 # Network interfaces
 [interfaces]
 # Primary network interface (preferred)
-primary = "enp10s0"
+primary = "enp2s0f0u2"
 # Secondary network interface (fallback)
-secondary = "enp12s0f3u1"
+secondary = "enp10s0"
 
 # Monitoring settings
 [monitoring]
 # Check interval in seconds
 interval = 30
+# Speed test interval in seconds (default: 3600 = 1 hour)
+speedtest_interval = 3600
+# Speed threshold percentage to switch to faster interface (default: 35)
+speed_threshold = 35
 # Log level: "error", "warn", "info", "debug", "trace"
 log_level = "info"
 # Log file path (leave empty for stdout)

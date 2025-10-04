@@ -53,16 +53,21 @@ pub fn get_current_interface(peer_ip: &str) -> Option<String> {
         .ok()?;
 
     let route = String::from_utf8_lossy(&output.stdout);
+    debug!("Raw route output for {}: {}", peer_ip, route);
+    
     for part in route.split_whitespace() {
         if part == "dev" {
-            return route
+            let interface = route
                 .split_whitespace()
                 .skip_while(|&x| x != "dev")
                 .nth(1)
                 .map(|s| s.to_string());
+            debug!("Found interface for {}: {:?}", peer_ip, interface);
+            return interface;
         }
     }
 
+    debug!("No interface found for {}", peer_ip);
     None
 }
 
