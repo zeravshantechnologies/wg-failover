@@ -1,6 +1,6 @@
 # WireGuard Network Failover
 
-A Rust application for monitoring and automatically switching between multiple network interfaces to maintain continuous WireGuard VPN connectivity. This ensures your VPN connection remains active even when one of your network interfaces (such as Ethernet or WiFi) fails.
+A Rust application for monitoring and automatically switching between multiple network interfaces to maintain continuous WireGuard VPN connectivity. This ensures your VPN connection remains active even when one of your network interfaces fails, providing maximum uptime for web services and applications.
 
 ## Overview
 
@@ -8,12 +8,13 @@ This tool solves the problem of maintaining uninterrupted VPN connectivity when 
 
 ## Features
 
-- **Automatic failover**: Seamless switching between primary and secondary network interfaces
+- **Automatic failover**: Immediate switching between primary and secondary network interfaces when connectivity is lost
 - **Speed-based optimization**: Periodically tests interface speeds and switches to faster connections
 - **Configurable thresholds**: Set minimum speed improvement percentage before switching
+- **Anti-flapping protection**: Minimum time between switches to prevent rapid toggling
 - **Dual monitoring**: Quick connectivity checks + periodic speed tests
 - **Flexible configuration**: Command-line arguments or configuration file
-- **Detailed logging**: Comprehensive monitoring and troubleshooting
+- **Detailed logging**: Comprehensive monitoring and troubleshooting with failover counters
 - **Systemd service integration**: Easy deployment as a system service
 
 ## Installation
@@ -150,7 +151,8 @@ log_level = "info"
 1. **Connectivity Monitoring (Fast)**
    - Checks interface connectivity every 30 seconds (configurable)
    - Immediately switches to backup interface if primary fails
-   - Ensures continuous VPN connectivity
+   - Automatically switches back to primary when it recovers
+   - Ensures continuous VPN connectivity with zero downtime
 
 2. **Speed Optimization (Periodic)**
    - Performs speed tests every hour (configurable)
@@ -160,9 +162,10 @@ log_level = "info"
 
 ### Operation Modes
 
-- **Failover Mode**: When primary interface loses connectivity, immediately switch to secondary
+- **Automatic Failover Mode**: When primary interface loses connectivity, immediately switch to secondary
 - **Speed Optimization Mode**: When both interfaces are active, use the faster one
-- **Auto-recovery**: Automatically switch back to primary when it becomes available and faster
+- **Auto-recovery**: Automatically switch back to primary when it becomes available
+- **Anti-flapping**: Minimum 30-second delay between switches to prevent rapid toggling
 
 ## Configuration Priority
 
@@ -179,6 +182,7 @@ log_level = "info"
 - **Interface not found**: Verify interface names with `ip link show`
 - **Speed test fails**: Install `speedtest-cli` package
 - **No connectivity after switch**: Check gateway detection and routing tables
+- **Rapid interface switching**: The anti-flapping protection prevents switches within 30 seconds of each other
 
 ### Debug Mode
 
