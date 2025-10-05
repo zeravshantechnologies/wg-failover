@@ -9,6 +9,8 @@ use std::process::Command;
 use std::env;
 use std::path::PathBuf;
 
+mod network;
+
 /// WireGuard Failover - A utility for ensuring optimal WireGuard VPN connectivity
 /// by managing routes based on interface speed optimization
 #[derive(Parser, Debug)]
@@ -195,26 +197,27 @@ fn get_current_default_interface() -> Option<String> {
 }
 
 /// Switch the default route to use the specified interface
-fn switch_default_route(iface: &str) -> Result<()> {
-    let gateway = get_gateway_for_interface(iface)
-        .context(format!("Failed to find gateway for {}", iface))?;
-    
-    debug!("Switching default route to interface {} via {}", iface, gateway);
-
-    // Delete all existing default routes
-    let _ = Command::new("ip")
-        .args(["route", "del", "default"])
-        .output();
-    
-    // Add new default route
-    Command::new("ip")
-        .args(["route", "add", "default", "via", &gateway, "dev", iface])
-        .output()
-        .context("Failed to add default route")?;
-        
-    debug!("Successfully switched default route to interface {}", iface);
-    Ok(())
-}
+// This function is no longer used and can be removed
+// fn switch_default_route(iface: &str) -> Result<()> {
+//     let gateway = get_gateway_for_interface(iface)
+//         .context(format!("Failed to find gateway for {}", iface))?;
+//     
+//     debug!("Switching default route to interface {} via {}", iface, gateway);
+//
+//     // Delete all existing default routes
+//     let _ = Command::new("ip")
+//         .args(["route", "del", "default"])
+//         .output();
+//     
+//     // Add new default route
+//     Command::new("ip")
+//         .args(["route", "add", "default", "via", &gateway, "dev", iface])
+//         .output()
+//         .context("Failed to add default route")?;
+//         
+//     debug!("Successfully switched default route to interface {}", iface);
+//     Ok(())
+// }
 
 /// Check if a given interface exists
 fn interface_exists(iface: &str) -> bool {
@@ -562,11 +565,11 @@ fn main() -> Result<()> {
                     
                     // Check if we should switch based on speed
                     info!("📈 Speed comparison summary:");
-                    info!("   Current interface: {:?}", get_current_default_interface());
+                    info!("   Current interface for peer {}: {:?}", peer_ip, network::get_current_interface(&peer_ip).as_deref().unwrap_or("unknown"));
                     info!("   Primary download: {:.2} Mbps", primary_res.download_speed);
                     info!("   Secondary download: {:.2} Mbps", secondary_res.download_speed);
                     info!("   Speed threshold: {}%", speed_threshold);
-                    if let Some(current_iface) = get_current_default_interface() {
+                    if let Some(current_iface) = network::get_current_interface(&peer_ip) {
                         if let Some(target_iface) = should_switch_to_faster_interface(
                             &primary_res, 
                             &secondary_res, 
@@ -574,10 +577,13 @@ fn main() -> Result<()> {
                             speed_threshold,
                         ) {
                             log_with_timestamp(&format!("🚀 Switching to faster interface: {}", target_iface));
-                            if let Err(e) = switch_default_route(&target_iface) {
-                                error!("Failed to switch to faster interface: {}", e);
-                            } else {
-                                info!("Successfully switched to faster interface: {}", target_iface);
+                            match network::switch_interface(&target_iface, &peer_ip) {
+                                Ok(_) => {
+                                    info!("✅ Successfully switched to faster interface {} for peer {}", target_iface, peer_ip);
+                                }
+                                Err(e) => {
+                                    error!("❌ Failed to switch to faster interface {}: {}", target_iface, e);
+                                }
                             }
                         } else {
                             info!("No significant speed improvement detected, keeping current interface");
@@ -614,7 +620,7 @@ fn main() -> Result<()> {
             }
         }
         
-        // Check interface connectivity (for monitoring only - no automatic switching)
+        // Check interface connectivity and perform automatic failover
         info!("Checking primary interface: {}", primary);
         let primary_ok = ping_interface(&primary, &peer_ip, count, timeout);
         info!("Primary interface {} connectivity to {}: {}",
@@ -624,25 +630,56 @@ fn main() -> Result<()> {
         let secondary_ok = ping_interface(&secondary, &peer_ip, count, timeout);
         info!("Secondary interface {} connectivity to {}: {}",
             secondary, peer_ip, if secondary_ok { "OK" } else { "FAIL" });
-        
-        // Get current default route interface
-        let current_iface = get_current_default_interface();
-        info!("Current default route interface: {:?}",
-            current_iface.as_deref().unwrap_or("unknown"));
-        
-        // Only handle connectivity issues for logging - let WireGuard handle failover
-        match (primary_ok, secondary_ok) {
-            (true, true) => {
-                debug!("Both interfaces are working correctly");
+
+        // Get current interface being used for the peer (not default route)
+        let current_peer_iface = network::get_current_interface(&peer_ip);
+        info!("Current interface for peer {}: {:?}",
+            peer_ip, current_peer_iface.as_deref().unwrap_or("unknown"));
+
+        // Handle automatic failover based on connectivity
+        let target_interface = if !primary_ok && secondary_ok {
+            // Primary failed, secondary works - switch to secondary immediately
+            Some(&secondary)
+        } else if primary_ok && !secondary_ok {
+            // Secondary failed, primary works - ensure we're on primary
+            if current_peer_iface.as_deref() != Some(&primary) {
+                Some(&primary)
+            } else {
+                None
             }
-            (false, true) => {
-                warn!("Primary interface is down, but secondary is working");
+        } else if primary_ok && secondary_ok {
+            // Both work - prefer primary unless we're already on secondary for speed reasons
+            // But if we're on secondary and primary is working, consider switching back to primary
+            // Only switch back if we're not in the middle of a speed-optimized state
+            if current_peer_iface.as_deref() == Some(&secondary) {
+                // Check if we should switch back to primary (prefer primary when both work)
+                Some(&primary)
+            } else {
+                // Already on primary, no switch needed
+                None
             }
-            (true, false) => {
-                warn!("Secondary interface is down, but primary is working");
+        } else {
+            // Both interfaces failed
+            error!("Both interfaces are unreachable - cannot switch");
+            None
+        };
+
+        if let Some(target_interface) = target_interface {
+            log_with_timestamp(&format!("🔄 Automatic failover: Switching to interface {}", target_interface));
+            match network::switch_interface(target_interface, &peer_ip) {
+                Ok(_) => {
+                    info!("✅ Successfully switched to interface {} for peer {}", target_interface, peer_ip);
+                }
+                Err(e) => {
+                    error!("❌ Failed to switch to interface {}: {}", target_interface, e);
+                }
             }
-            (false, false) => {
-                error!("Both interfaces are unreachable");
+        } else if !(primary_ok && secondary_ok && current_peer_iface.as_deref() == Some(&primary)) {
+            // Log status when no switch occurs but we're not in optimal state
+            if !primary_ok && !secondary_ok {
+                warn!("⚠️  Both interfaces down - maintaining current route");
+            } else if current_peer_iface.as_deref() == Some(&secondary) && primary_ok {
+                debug!("💡 On secondary interface but primary is working - keeping current route (may switch on next speed test)");
             }
         }
 
