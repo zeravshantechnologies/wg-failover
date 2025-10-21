@@ -557,49 +557,34 @@ mod tests {
     }
 }
 
-fn main() -> Result<()> {
-    // Initialize logging
-    env_logger::init();
-
-    // Parse command line arguments
-    let args = Args::parse();
-
-    // Track current active interface for failover
-    let mut current_active_interface: Option<String>;
-    let mut failover_count = 0;
-    let mut last_switch_time = std::time::Instant::now();
-    
-    // Track speed test results for connectivity-based decisions
-    let mut primary_speed_result: Option<SpeedTestResult> = None;
-    let mut secondary_speed_result: Option<SpeedTestResult> = None;
-
-    // Load configuration from CLI, environment, or default location
-    let config = if let Some(config_path) = args.config {
+/// Load configuration from file, environment, or CLI arguments
+fn load_configuration(args: &Args) -> Result<Config> {
+    if let Some(config_path) = &args.config {
         info!("Loading configuration from: {}", config_path.display());
-        let config_str = std::fs::read_to_string(&config_path)
+        let config_str = std::fs::read_to_string(config_path)
             .context(format!("Failed to read config file: {}", config_path.display()))?;
         toml::from_str::<Config>(&config_str)
-            .context("Failed to parse config file")?
+            .context("Failed to parse config file")
     } else if let Ok(path) = env::var("WG_FAILOVER_CONFIG") {
         info!("Loading configuration from environment: {}", path);
         let config_str = std::fs::read_to_string(&path)
             .context(format!("Failed to read config file: {}", path))?;
         toml::from_str::<Config>(&config_str)
-            .context("Failed to parse config file")?
+            .context("Failed to parse config file")
     } else {
         info!("Using CLI arguments");
-        Config {
+        Ok(Config {
             peer_config: PeerConfig {
-                ip: args.peer_ip.context("--peer-ip required when no config file is specified")?,
+                ip: args.peer_ip.clone().context("--peer-ip required when no config file is specified")?,
                 count: Some(args.count),
                 timeout: Some(args.timeout),
             },
             wireguard_config: WireguardConfig {
-                interface: args.wg_interface.context("--wg-interface required when no config file is specified")?,
+                interface: args.wg_interface.clone().context("--wg-interface required when no config file is specified")?,
             },
             interface_config: InterfaceConfig {
-                primary: args.primary.context("--primary required when no config file is specified")?,
-                secondary: args.secondary.context("--secondary required when no config file is specified")?,
+                primary: args.primary.clone().context("--primary required when no config file is specified")?,
+                secondary: args.secondary.clone().context("--secondary required when no config file is specified")?,
             },
             monitoring_config: MonitoringConfig {
                 interval: Some(args.interval),
@@ -609,14 +594,16 @@ fn main() -> Result<()> {
                 speed_test_count: Some(args.speed_test_count),
                 speed_test_timeout: Some(args.speed_test_timeout),
             },
-        }
-    };
+        })
+    }
+}
 
-    // Extract parameters from config
-    let peer_ip = config.peer_config.ip;
-    let wg_interface = config.wireguard_config.interface;
-    let primary = config.interface_config.primary;
-    let secondary = config.interface_config.secondary;
+/// Extract all configuration parameters with CLI fallbacks
+fn extract_config_parameters(config: &Config, args: &Args) -> (String, String, String, String, u64, u64, u8, u64, u8, u8, u8, u8) {
+    let peer_ip = config.peer_config.ip.clone();
+    let wg_interface = config.wireguard_config.interface.clone();
+    let primary = config.interface_config.primary.clone();
+    let secondary = config.interface_config.secondary.clone();
     let interval = config.monitoring_config.interval.unwrap_or(args.interval);
     let speedtest_interval = config.monitoring_config.speedtest_interval.unwrap_or(args.speedtest_interval);
     let speed_threshold = config.monitoring_config.speed_threshold.unwrap_or(args.speed_threshold);
@@ -626,6 +613,35 @@ fn main() -> Result<()> {
     let count = config.peer_config.count.unwrap_or(args.count);
     let timeout = config.peer_config.timeout.unwrap_or(args.timeout);
 
+    (
+        peer_ip,
+        wg_interface,
+        primary,
+        secondary,
+        interval,
+        speedtest_interval,
+        speed_threshold,
+        min_switch_interval,
+        speed_test_count,
+        speed_test_timeout,
+        count,
+        timeout,
+    )
+}
+
+/// Log startup configuration parameters
+fn log_startup_configuration(
+    peer_ip: &str,
+    wg_interface: &str,
+    primary: &str,
+    secondary: &str,
+    interval: u64,
+    speedtest_interval: u64,
+    speed_threshold: u8,
+    min_switch_interval: u64,
+    speed_test_count: u8,
+    speed_test_timeout: u8,
+) {
     info!("WireGuard Failover started");
     info!("Configuration:");
     info!("  Peer IP: {}", peer_ip);
@@ -638,41 +654,54 @@ fn main() -> Result<()> {
     info!("  Min Switch Interval: {} seconds", min_switch_interval);
     info!("  Speed Test Ping Count: {}", speed_test_count);
     info!("  Speed Test Ping Timeout: {} seconds", speed_test_timeout);
+}
 
-    // Verify interfaces exist
-    if !interface_exists(&primary) {
+/// Verify that both interfaces exist
+fn verify_interfaces(primary: &str, secondary: &str) -> Result<()> {
+    if !interface_exists(primary) {
         return Err(anyhow::anyhow!(
             "Primary interface '{}' not found",
             primary
         ));
     }
 
-    if !interface_exists(&secondary) {
+    if !interface_exists(secondary) {
         return Err(anyhow::anyhow!(
             "Secondary interface '{}' not found",
             secondary
         ));
     }
+    Ok(())
+}
 
-    // Handle Ctrl+C gracefully
+/// Set up signal handler for graceful shutdown
+fn setup_signal_handler() -> Result<()> {
     ctrlc::set_handler(move || {
         info!("Received termination signal. Exiting...");
         exit(0);
     })?;
+    Ok(())
+}
 
-    let mut last_speed_test = std::time::Instant::now();
-
+/// Initialize active interface based on startup evaluation
+fn initialize_active_interface(
+    primary: &str,
+    secondary: &str,
+    peer_ip: &str,
+    count: u8,
+    timeout: u8,
+    speed_threshold: u8,
+) -> Option<String> {
     // Evaluate which interface to use at startup
     let (startup_interface, needs_switch) = evaluate_startup_interface(
-        &primary,
-        &secondary,
-        &peer_ip,
+        primary,
+        secondary,
+        peer_ip,
         count,
         timeout,
         speed_threshold,
     );
     
-    current_active_interface = Some(startup_interface.clone());
     info!("Startup evaluation complete - active interface set to: {}", startup_interface);
 
     // Only switch routes if evaluation determined it's necessary
@@ -686,13 +715,178 @@ fn main() -> Result<()> {
         info!("No route switch needed - keeping current default route");
     }
 
+    Some(startup_interface)
+}
+
+/// Perform periodic speed tests and handle results
+fn perform_periodic_speed_tests(
+    primary: &str,
+    secondary: &str,
+    peer_ip: &str,
+    speed_test_count: u8,
+    speed_test_timeout: u8,
+    speed_threshold: u8,
+    last_speed_test: &mut std::time::Instant,
+    current_time: std::time::Instant,
+) -> (Option<SpeedTestResult>, Option<SpeedTestResult>) {
+    info!("Performing periodic speed tests...");
+    debug!("DEBUG: Speed test condition met - calling perform_speed_test functions");
+
+    debug!("DEBUG: Calling perform_speed_test for primary interface");
+    let primary_result = perform_speed_test(primary, peer_ip, speed_test_count, speed_test_timeout);
+    debug!("DEBUG: Primary speed test result: {:?}", primary_result.is_some());
+
+    debug!("DEBUG: Calling perform_speed_test for secondary interface");
+    let secondary_result = perform_speed_test(secondary, peer_ip, speed_test_count, speed_test_timeout);
+    debug!("DEBUG: Secondary speed test result: {:?}", secondary_result.is_some());
+
+    // Handle speed test results even if one interface fails
+    debug!("Processing speed test results - primary: {:?}, secondary: {:?}",
+           primary_result.is_some(), secondary_result.is_some());
+    match (&primary_result, &secondary_result) {
+        (Some(primary_res), Some(secondary_res)) => {
+            *last_speed_test = current_time;
+
+            log_with_timestamp("📊 Speed test results:");
+            info!("🎯 PRIMARY INTERFACE ({})", primary);
+            info!("   Download: {:.2} Mbps", primary_res.download_speed);
+            info!("   Upload: {:.2} Mbps", primary_res.upload_speed);
+            info!("   Latency: {:.1} ms", primary_res.latency);
+            info!("");
+            info!("🔄 SECONDARY INTERFACE ({})", secondary);
+            info!("   Download: {:.2} Mbps", secondary_res.download_speed);
+            info!("   Upload: {:.2} Mbps", secondary_res.upload_speed);
+            info!("   Latency: {:.1} ms", secondary_res.latency);
+            info!("");
+
+            // Check if we should switch based on speed
+            info!("📈 Speed comparison summary:");
+            info!("   Current interface: {:?}", get_current_default_interface());
+            info!("   Primary download: {:.2} Mbps", primary_res.download_speed);
+            info!("   Secondary download: {:.2} Mbps", secondary_res.download_speed);
+            info!("   Speed threshold: {}%", speed_threshold);
+            if let Some(current_iface) = get_current_default_interface() {
+                if let Some(target_iface) = should_switch_to_faster_interface(
+                    primary_res,
+                    secondary_res,
+                    &current_iface,
+                    speed_threshold,
+                ) {
+                    log_with_timestamp(&format!("🚀 Switching to faster interface: {}", target_iface));
+                    if let Err(e) = switch_default_route(&target_iface) {
+                        error!("Failed to switch to faster interface: {}", e);
+                    } else {
+                        info!("Successfully switched to faster interface: {}", target_iface);
+                    }
+                } else {
+                    info!("No significant speed improvement detected, keeping current interface");
+                }
+            } else {
+                warn!("Could not determine current interface for speed-based switching");
+            }
+        }
+        (Some(primary_res), None) => {
+            *last_speed_test = current_time;
+            log_with_timestamp("📊 Speed test results (secondary interface failed):");
+            info!("🎯 PRIMARY INTERFACE ({})", primary);
+            info!("   Download: {:.2} Mbps", primary_res.download_speed);
+            info!("   Upload: {:.2} Mbps", primary_res.upload_speed);
+            info!("   Latency: {:.1} ms", primary_res.latency);
+            info!("");
+            info!("❌ SECONDARY INTERFACE ({}) - FAILED", secondary);
+            warn!("Secondary interface speed test failed - using primary interface");
+        }
+        (None, Some(secondary_res)) => {
+            *last_speed_test = current_time;
+            log_with_timestamp("📊 Speed test results (primary interface failed):");
+            info!("❌ PRIMARY INTERFACE ({}) - FAILED", primary);
+            info!("");
+            info!("🔄 SECONDARY INTERFACE ({})", secondary);
+            info!("   Download: {:.2} Mbps", secondary_res.download_speed);
+            info!("   Upload: {:.2} Mbps", secondary_res.upload_speed);
+            info!("   Latency: {:.1} ms", secondary_res.latency);
+            warn!("Primary interface speed test failed - using secondary interface");
+        }
+        (None, None) => {
+            warn!("Speed tests failed for both interfaces");
+        }
+    }
+
+    (primary_result, secondary_result)
+}
+
+fn main() -> Result<()> {
+    // Initialize logging
+    env_logger::init();
+
+    // Parse command line arguments
+    let args = Args::parse();
+
+    // Load configuration and extract parameters
+    let config = load_configuration(&args)?;
+    let (
+        peer_ip,
+        wg_interface,
+        primary,
+        secondary,
+        interval,
+        speedtest_interval,
+        speed_threshold,
+        min_switch_interval,
+        speed_test_count,
+        speed_test_timeout,
+        count,
+        timeout,
+    ) = extract_config_parameters(&config, &args);
+
+    // Track current active interface for failover
+    let mut current_active_interface: Option<String>;
+    let mut failover_count = 0;
+    let mut last_switch_time = std::time::Instant::now();
+    
+    // Track speed test results for connectivity-based decisions
+    let mut primary_speed_result: Option<SpeedTestResult> = None;
+    let mut secondary_speed_result: Option<SpeedTestResult> = None;
+
+    // Log startup configuration
+    log_startup_configuration(
+        &peer_ip,
+        &wg_interface,
+        &primary,
+        &secondary,
+        interval,
+        speedtest_interval,
+        speed_threshold,
+        min_switch_interval,
+        speed_test_count,
+        speed_test_timeout,
+    );
+
+    // Verify interfaces exist
+    verify_interfaces(&primary, &secondary)?;
+
+    // Handle Ctrl+C gracefully
+    setup_signal_handler()?;
+
+    let mut last_speed_test = std::time::Instant::now();
+
+    // Initialize active interface based on startup evaluation
+    current_active_interface = initialize_active_interface(
+        &primary,
+        &secondary,
+        &peer_ip,
+        count,
+        timeout,
+        speed_threshold,
+    );
+
     // Debug: Check if we're entering the main loop
     debug!("Configuration loaded successfully, entering main loop");
 
     // Main monitoring loop
     loop {
         let current_time = std::time::Instant::now();
-        let time_since_last_switch = current_time.duration_since(last_switch_time).as_secs();
+        let _time_since_last_switch = current_time.duration_since(last_switch_time).as_secs();
         debug!("Main loop iteration started");
 
         // Perform speed tests only when interval has elapsed
@@ -702,230 +896,199 @@ fn main() -> Result<()> {
                elapsed, speedtest_interval, should_run_speed_test);
 
         if should_run_speed_test {
-            info!("Performing periodic speed tests...");
-            debug!("DEBUG: Speed test condition met - calling perform_speed_test functions");
-
-            debug!("DEBUG: Calling perform_speed_test for primary interface");
-            let primary_result = perform_speed_test(&primary, &peer_ip, speed_test_count, speed_test_timeout);
-            debug!("DEBUG: Primary speed test result: {:?}", primary_result.is_some());
-
-            debug!("DEBUG: Calling perform_speed_test for secondary interface");
-            let secondary_result = perform_speed_test(&secondary, &peer_ip, speed_test_count, speed_test_timeout);
-            debug!("DEBUG: Secondary speed test result: {:?}", secondary_result.is_some());
-
+            let speed_test_results = perform_periodic_speed_tests(
+                &primary,
+                &secondary,
+                &peer_ip,
+                speed_test_count,
+                speed_test_timeout,
+                speed_threshold,
+                &mut last_speed_test,
+                current_time,
+            );
+            
             // Store speed test results for connectivity-based decisions
-            primary_speed_result = primary_result.clone();
-            secondary_speed_result = secondary_result.clone();
-
-            // Handle speed test results even if one interface fails
-            debug!("Processing speed test results - primary: {:?}, secondary: {:?}",
-                   primary_result.is_some(), secondary_result.is_some());
-            match (primary_result, secondary_result) {
-                (Some(primary_res), Some(secondary_res)) => {
-                    last_speed_test = current_time;
-
-                    log_with_timestamp("📊 Speed test results:");
-                    info!("🎯 PRIMARY INTERFACE ({})", primary);
-                    info!("   Download: {:.2} Mbps", primary_res.download_speed);
-                    info!("   Upload: {:.2} Mbps", primary_res.upload_speed);
-                    info!("   Latency: {:.1} ms", primary_res.latency);
-                    info!("");
-                    info!("🔄 SECONDARY INTERFACE ({})", secondary);
-                    info!("   Download: {:.2} Mbps", secondary_res.download_speed);
-                    info!("   Upload: {:.2} Mbps", secondary_res.upload_speed);
-                    info!("   Latency: {:.1} ms", secondary_res.latency);
-                    info!("");
-
-                    // Check if we should switch based on speed
-                    info!("📈 Speed comparison summary:");
-                    info!("   Current interface: {:?}", get_current_default_interface());
-                    info!("   Primary download: {:.2} Mbps", primary_res.download_speed);
-                    info!("   Secondary download: {:.2} Mbps", secondary_res.download_speed);
-                    info!("   Speed threshold: {}%", speed_threshold);
-                    if let Some(current_iface) = get_current_default_interface() {
-                        if let Some(target_iface) = should_switch_to_faster_interface(
-                            &primary_res,
-                            &secondary_res,
-                            &current_iface,
-                            speed_threshold,
-                        ) {
-                            log_with_timestamp(&format!("🚀 Switching to faster interface: {}", target_iface));
-                            if let Err(e) = switch_default_route(&target_iface) {
-                                error!("Failed to switch to faster interface: {}", e);
-                            } else {
-                                info!("Successfully switched to faster interface: {}", target_iface);
-                            }
-                        } else {
-                            info!("No significant speed improvement detected, keeping current interface");
-                        }
-                    } else {
-                        warn!("Could not determine current interface for speed-based switching");
-                    }
-                }
-                (Some(primary_res), None) => {
-                    last_speed_test = current_time;
-                    log_with_timestamp("📊 Speed test results (secondary interface failed):");
-                    info!("🎯 PRIMARY INTERFACE ({})", primary);
-                    info!("   Download: {:.2} Mbps", primary_res.download_speed);
-                    info!("   Upload: {:.2} Mbps", primary_res.upload_speed);
-                    info!("   Latency: {:.1} ms", primary_res.latency);
-                    info!("");
-                    info!("❌ SECONDARY INTERFACE ({}) - FAILED", secondary);
-                    warn!("Secondary interface speed test failed - using primary interface");
-                }
-                (None, Some(secondary_res)) => {
-                    last_speed_test = current_time;
-                    log_with_timestamp("📊 Speed test results (primary interface failed):");
-                    info!("❌ PRIMARY INTERFACE ({}) - FAILED", primary);
-                    info!("");
-                    info!("🔄 SECONDARY INTERFACE ({})", secondary);
-                    info!("   Download: {:.2} Mbps", secondary_res.download_speed);
-                    info!("   Upload: {:.2} Mbps", secondary_res.upload_speed);
-                    info!("   Latency: {:.1} ms", secondary_res.latency);
-                    warn!("Primary interface speed test failed - using secondary interface");
-                }
-                (None, None) => {
-                    warn!("Speed tests failed for both interfaces");
-                }
-            }
+            primary_speed_result = speed_test_results.0;
+            secondary_speed_result = speed_test_results.1;
         }
 
-        // Check interface connectivity with automatic failover
-        info!("Checking primary interface: {}", primary);
-        let primary_ok = ping_interface(&primary, &peer_ip, count, timeout);
-        info!("Primary interface {} connectivity to {}: {}",
-            primary, peer_ip, if primary_ok { "OK" } else { "FAIL" });
-
-        info!("Checking secondary interface: {}", secondary);
-        let secondary_ok = ping_interface(&secondary, &peer_ip, count, timeout);
-        info!("Secondary interface {} connectivity to {}: {}",
-            secondary, peer_ip, if secondary_ok { "OK" } else { "FAIL" });
-
-        // Get current default route interface
-        let current_iface = get_current_default_interface();
-        info!("Current default route interface: {:?}",
-            current_iface.as_deref().unwrap_or("unknown"));
-
-        // Automatic failover logic
-        match (primary_ok, secondary_ok) {
-            (true, true) => {
-                debug!("Both interfaces are working correctly");
-                
-                // Check if we should switch based on speed comparison
-                let should_switch = if let Some(current_iface) = &current_active_interface {
-                    // Only consider switching if we have recent speed test data
-                    let elapsed_since_speed_test = current_time.duration_since(last_speed_test).as_secs();
-                    if elapsed_since_speed_test < speedtest_interval {
-                        // We have recent speed test data, use speed-based decision
-                        match (&primary_speed_result, &secondary_speed_result) {
-                            (Some(primary_res), Some(secondary_res)) => {
-                                if current_iface == &primary {
-                                    // Check if secondary is significantly faster
-                                    let speed_improvement = ((secondary_res.download_speed - primary_res.download_speed) / primary_res.download_speed) * 100.0;
-                                    if speed_improvement >= speed_threshold as f64 {
-                                        info!("Speed-based decision: secondary is {:.1}% faster than primary", speed_improvement);
-                                        true
-                                    } else {
-                                        false
-                                    }
-                                } else if current_iface == &secondary {
-                                    // Check if primary is faster
-                                    if primary_res.download_speed > secondary_res.download_speed {
-                                        info!("Speed-based decision: primary is faster than secondary");
-                                        true
-                                    } else {
-                                        false
-                                    }
-                                } else {
-                                    // Unknown current interface, default to primary preference
-                                    current_iface != &primary
-                                }
-                            }
-                            _ => {
-                                // No speed test data available, default to primary preference
-                                current_iface != &primary
-                            }
-                        }
-                    } else {
-                        // No recent speed test data, default to primary preference
-                        current_iface != &primary
-                    }
-                } else {
-                    // No current interface, default to primary
-                    true
-                };
-
-                // Only switch if needed and minimum interval has passed
-                if should_switch && current_active_interface.as_deref() != Some(&primary) && time_since_last_switch >= min_switch_interval {
-                    log_with_timestamp("🔄 Both interfaces available, switching to optimal interface");
-                    info!("Switching from {} to primary: {}",
-                          current_active_interface.as_deref().unwrap_or("unknown"), primary);
-                    if let Err(e) = switch_default_route(&primary) {
-                        error!("Failed to switch to primary interface: {}", e);
-                    } else {
-                        current_active_interface = Some(primary.clone());
-                        last_switch_time = current_time;
-                        info!("Successfully switched to primary interface: {}", primary);
-                    }
-                } else if should_switch && current_active_interface.as_deref() != Some(&primary) {
-                    debug!("Interface switch delayed: {}s since last switch (minimum {}s required)",
-                           time_since_last_switch, min_switch_interval);
-                } else if !should_switch && current_active_interface.as_deref() == Some(&secondary) {
-                    debug!("Keeping secondary interface (speed-based decision)");
-                }
-            }
-            (false, true) => {
-                warn!("Primary interface is down, but secondary is working");
-                // Switch to secondary if primary fails
-                if current_active_interface.as_deref() != Some(&secondary) && time_since_last_switch >= min_switch_interval {
-                    failover_count += 1;
-                    log_with_timestamp("🚨 Primary interface failed, switching to secondary");
-                    info!("Failover #{}: Switching from {} to secondary: {}",
-                          failover_count, current_active_interface.as_deref().unwrap_or("unknown"), secondary);
-                    if let Err(e) = switch_default_route(&secondary) {
-                        error!("Failed to switch to secondary interface: {}", e);
-                    } else {
-                        current_active_interface = Some(secondary.clone());
-                        last_switch_time = current_time;
-                        info!("Successfully failed over to secondary interface: {}", secondary);
-                    }
-                } else if current_active_interface.as_deref() != Some(&secondary) {
-                    debug!("Interface switch delayed: {}s since last switch (minimum {}s required)",
-                           time_since_last_switch, min_switch_interval);
-                }
-            }
-            (true, false) => {
-                warn!("Secondary interface is down, but primary is working");
-                // Switch to primary if secondary fails (and we're not already on primary)
-                if current_active_interface.as_deref() != Some(&primary) && time_since_last_switch >= min_switch_interval {
-                    log_with_timestamp("🔄 Secondary interface failed, switching to primary");
-                    info!("Switching from {} to primary: {}",
-                          current_active_interface.as_deref().unwrap_or("unknown"), primary);
-                    if let Err(e) = switch_default_route(&primary) {
-                        error!("Failed to switch to primary interface: {}", e);
-                    } else {
-                        current_active_interface = Some(primary.clone());
-                        last_switch_time = current_time;
-                        info!("Successfully switched to primary interface: {}", primary);
-                    }
-                } else if current_active_interface.as_deref() != Some(&primary) {
-                    debug!("Interface switch delayed: {}s since last switch (minimum {}s required)",
-                           time_since_last_switch, min_switch_interval);
-                }
-            }
-            (false, false) => {
-                error!("Both interfaces are unreachable");
-                // Try to recover by attempting to use the last known good interface
-                if let Some(last_good_iface) = &current_active_interface {
-                    warn!("Attempting to use last known good interface: {}", last_good_iface);
-                    if let Err(e) = switch_default_route(last_good_iface) {
-                        error!("Failed to switch to last known good interface: {}", e);
-                    }
-                }
-            }
-        }
+        // Check interface connectivity and handle failover
+        handle_connectivity_and_failover(
+            &primary,
+            &secondary,
+            &peer_ip,
+            count,
+            timeout,
+            &mut current_active_interface,
+            &mut failover_count,
+            &mut last_switch_time,
+            min_switch_interval,
+            speedtest_interval,
+            speed_threshold,
+            &mut last_speed_test,
+            &primary_speed_result,
+            &secondary_speed_result,
+            current_time,
+        );
 
         thread::sleep(time::Duration::from_secs(interval));
+    }
+}
+
+/// Check interface connectivity and handle automatic failover
+fn handle_connectivity_and_failover(
+    primary: &str,
+    secondary: &str,
+    peer_ip: &str,
+    count: u8,
+    timeout: u8,
+    current_active_interface: &mut Option<String>,
+    failover_count: &mut u32,
+    last_switch_time: &mut std::time::Instant,
+    min_switch_interval: u64,
+    speedtest_interval: u64,
+    speed_threshold: u8,
+    last_speed_test: &mut std::time::Instant,
+    primary_speed_result: &Option<SpeedTestResult>,
+    secondary_speed_result: &Option<SpeedTestResult>,
+    current_time: std::time::Instant,
+) {
+    // Check interface connectivity with automatic failover
+    info!("Checking primary interface: {}", primary);
+    let primary_ok = ping_interface(primary, peer_ip, count, timeout);
+    info!("Primary interface {} connectivity to {}: {}",
+        primary, peer_ip, if primary_ok { "OK" } else { "FAIL" });
+
+    info!("Checking secondary interface: {}", secondary);
+    let secondary_ok = ping_interface(secondary, peer_ip, count, timeout);
+    info!("Secondary interface {} connectivity to {}: {}",
+        secondary, peer_ip, if secondary_ok { "OK" } else { "FAIL" });
+
+    // Get current default route interface
+    let current_iface = get_current_default_interface();
+    info!("Current default route interface: {:?}",
+        current_iface.as_deref().unwrap_or("unknown"));
+
+    // Automatic failover logic
+    match (primary_ok, secondary_ok) {
+        (true, true) => {
+            debug!("Both interfaces are working correctly");
+            
+            // Check if we should switch based on speed comparison
+            let should_switch = if let Some(current_iface) = current_active_interface {
+                // Only consider switching if we have recent speed test data
+                let elapsed_since_speed_test = current_time.duration_since(*last_speed_test).as_secs();
+                if elapsed_since_speed_test < speedtest_interval {
+                    // We have recent speed test data, use speed-based decision
+                    match (primary_speed_result, secondary_speed_result) {
+                        (Some(primary_res), Some(secondary_res)) => {
+                            if current_iface == primary {
+                                // Check if secondary is significantly faster
+                                let speed_improvement = ((secondary_res.download_speed - primary_res.download_speed) / primary_res.download_speed) * 100.0;
+                                if speed_improvement >= speed_threshold as f64 {
+                                    info!("Speed-based decision: secondary is {:.1}% faster than primary", speed_improvement);
+                                    true
+                                } else {
+                                    false
+                                }
+                            } else if current_iface == secondary {
+                                // Check if primary is faster
+                                if primary_res.download_speed > secondary_res.download_speed {
+                                    info!("Speed-based decision: primary is faster than secondary");
+                                    true
+                                } else {
+                                    false
+                                }
+                            } else {
+                                // Unknown current interface, default to primary preference
+                                current_iface != primary
+                            }
+                        }
+                        _ => {
+                            // No speed test data available, default to primary preference
+                            current_iface != primary
+                        }
+                    }
+                } else {
+                    // No recent speed test data, default to primary preference
+                    current_iface != primary
+                }
+            } else {
+                // No current interface, default to primary
+                true
+            };
+
+            // Only switch if needed and minimum interval has passed
+            let time_since_last_switch = current_time.duration_since(*last_switch_time).as_secs();
+            if should_switch && current_active_interface.as_deref() != Some(primary) && time_since_last_switch >= min_switch_interval {
+                log_with_timestamp("🔄 Both interfaces available, switching to optimal interface");
+                info!("Switching from {} to primary: {}",
+                      current_active_interface.as_deref().unwrap_or("unknown"), primary);
+                if let Err(e) = switch_default_route(primary) {
+                    error!("Failed to switch to primary interface: {}", e);
+                } else {
+                    *current_active_interface = Some(primary.to_string());
+                    *last_switch_time = current_time;
+                    info!("Successfully switched to primary interface: {}", primary);
+                }
+            } else if should_switch && current_active_interface.as_deref() != Some(primary) {
+                debug!("Interface switch delayed: {}s since last switch (minimum {}s required)",
+                       time_since_last_switch, min_switch_interval);
+            } else if !should_switch && current_active_interface.as_deref() == Some(secondary) {
+                debug!("Keeping secondary interface (speed-based decision)");
+            }
+        }
+        (false, true) => {
+            warn!("Primary interface is down, but secondary is working");
+            // Switch to secondary if primary fails
+            let time_since_last_switch = current_time.duration_since(*last_switch_time).as_secs();
+            if current_active_interface.as_deref() != Some(secondary) && time_since_last_switch >= min_switch_interval {
+                *failover_count += 1;
+                log_with_timestamp("🚨 Primary interface failed, switching to secondary");
+                info!("Failover #{}: Switching from {} to secondary: {}",
+                      *failover_count, current_active_interface.as_deref().unwrap_or("unknown"), secondary);
+                if let Err(e) = switch_default_route(secondary) {
+                    error!("Failed to switch to secondary interface: {}", e);
+                } else {
+                    *current_active_interface = Some(secondary.to_string());
+                    *last_switch_time = current_time;
+                    info!("Successfully failed over to secondary interface: {}", secondary);
+                }
+            } else if current_active_interface.as_deref() != Some(secondary) {
+                debug!("Interface switch delayed: {}s since last switch (minimum {}s required)",
+                       time_since_last_switch, min_switch_interval);
+            }
+        }
+        (true, false) => {
+            warn!("Secondary interface is down, but primary is working");
+            // Switch to primary if secondary fails (and we're not already on primary)
+            let time_since_last_switch = current_time.duration_since(*last_switch_time).as_secs();
+            if current_active_interface.as_deref() != Some(primary) && time_since_last_switch >= min_switch_interval {
+                log_with_timestamp("🔄 Secondary interface failed, switching to primary");
+                info!("Switching from {} to primary: {}",
+                      current_active_interface.as_deref().unwrap_or("unknown"), primary);
+                if let Err(e) = switch_default_route(primary) {
+                    error!("Failed to switch to primary interface: {}", e);
+                } else {
+                    *current_active_interface = Some(primary.to_string());
+                    *last_switch_time = current_time;
+                    info!("Successfully switched to primary interface: {}", primary);
+                }
+            } else if current_active_interface.as_deref() != Some(primary) {
+                debug!("Interface switch delayed: {}s since last switch (minimum {}s required)",
+                       time_since_last_switch, min_switch_interval);
+            }
+        }
+        (false, false) => {
+            error!("Both interfaces are unreachable");
+            // Try to recover by attempting to use the last known good interface
+            if let Some(last_good_iface) = current_active_interface {
+                warn!("Attempting to use last known good interface: {}", last_good_iface);
+                if let Err(e) = switch_default_route(last_good_iface) {
+                    error!("Failed to switch to last known good interface: {}", e);
+                }
+            }
+        }
     }
 }
 
