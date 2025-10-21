@@ -36,6 +36,12 @@ interval = 30
 speedtest_interval = 3600
 # Speed threshold percentage to switch to faster interface (default: 35)
 speed_threshold = 35
+# Minimum switch interval in seconds to prevent flapping (default: 30)
+min_switch_interval = 30
+# Number of ping attempts for speed tests (default: 3)
+speed_test_count = 3
+# Ping timeout in seconds for speed tests (default: 5)
+speed_test_timeout = 5
 # Log level: "error", "warn", "info", "debug", "trace"
 log_level = "info"
 # Log file path (leave empty for stdout)
