@@ -24,9 +24,9 @@ interface = "wg0"
 # Network interfaces
 [interfaces]
 # Primary network interface (preferred for auto-recovery)
-primary = "enp10s0"
+primary = "em3"
 # Secondary network interface (fallback for automatic failover)
-secondary = "enp2s0f0u2"
+secondary = "em4"
 
 # Monitoring settings
 [monitoring]

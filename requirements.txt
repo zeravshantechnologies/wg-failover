@@ -1,0 +1,2 @@
+# No Python dependencies required for wg-failover installer
+# The script uses only standard library modules

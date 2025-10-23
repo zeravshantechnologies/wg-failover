@@ -21,7 +21,8 @@ This tool solves the problem of maintaining uninterrupted VPN connectivity when 
 
 ### Prerequisites
 
-- Rust toolchain (1.60 or newer)
+- Rust toolchain (1.60 or newer) for building from source
+- Python 3.6+ for the installation script (no external dependencies required)
 - Linux operating system
 - `speedtest-cli` package for speed testing functionality
 - Root permissions for network changes
@@ -35,14 +36,51 @@ cd wg-failover
 
 # Build the project
 cargo build --release
-
-# Install the binary
-sudo cp target/release/wg-failover /usr/local/bin/
 ```
 
-### Systemd Service Setup
+### Automated Installation
+
+The project includes a Python installation script that can install locally or remotely:
+
+#### Local Installation
 
 ```bash
+# No external Python dependencies required - using only standard library modules
+
+# Note: For remote installation, the target server must have Python 3 and pip installed
+
+# Run the installation script
+sudo python3 install.py --local
+```
+
+#### Remote Installation
+
+```bash
+# Install Python dependencies
+pip install -r requirements.txt
+
+# Run the remote installation (will prompt for sudo password)
+python3 install.py --remote \
+  --target-ip 192.168.1.100 \
+  --private-key ~/.ssh/id_rsa \
+  --username your_username
+
+# Or provide sudo password via command line
+python3 install.py --remote \
+  --target-ip 192.168.1.100 \
+  --private-key ~/.ssh/id_rsa \
+  --username your_username \
+  --sudo-password your_sudo_password
+```
+
+### Manual Installation
+
+If you prefer manual installation:
+
+```bash
+# Copy the binary
+sudo cp target/release/wg-failover /usr/local/bin/
+
 # Copy the service file
 sudo cp wg-failover.service /etc/systemd/system/
 
@@ -50,6 +88,9 @@ sudo cp wg-failover.service /etc/systemd/system/
 sudo mkdir -p /etc/wg-failover
 
 # Create configuration file
+sudo cp config.toml /etc/wg-failover/config.toml
+
+# Edit the configuration file with your settings
 sudo nano /etc/wg-failover/config.toml
 
 # Reload systemd
