@@ -216,16 +216,42 @@ fn switch_default_route(iface: &str) -> Result<()> {
 
     debug!("Switching default route to interface {} via {}", iface, gateway);
 
-    // Delete all existing default routes
+    // Delete all existing default routes from main table
+    debug!("Deleting default routes from main table");
     let _ = Command::new("ip")
         .args(["route", "del", "default"])
         .output();
 
-    // Add new default route
+    // Add new default route to main table
+    debug!("Adding default route to main table: via {} dev {}", gateway, iface);
     Command::new("ip")
         .args(["route", "add", "default", "via", &gateway, "dev", iface])
         .output()
-        .context("Failed to add default route")?;
+        .context("Failed to add default route to main table")?;
+
+    // Handle WireGuard routing by modifying routing rules
+    // WireGuard uses fwmark 0xcb81 to determine routing table usage
+    // We need to ensure that traffic to our peer uses the main routing table
+    debug!("Adjusting routing rules for WireGuard compatibility");
+    
+    // Add a specific route for our peer IP to use the main table
+    // This overrides WireGuard's default routing for our specific peer
+    let peer_ip = std::env::var("WG_FAILOVER_PEER_IP").unwrap_or_else(|_| "206.189.140.174".to_string());
+    debug!("Adding specific route for peer {} via {} dev {}", peer_ip, gateway, iface);
+    
+    let _ = Command::new("ip")
+        .args(["route", "del", &peer_ip])
+        .output();
+        
+    let result = Command::new("ip")
+        .args(["route", "add", &peer_ip, "via", &gateway, "dev", iface])
+        .output();
+
+    if let Err(e) = result {
+        debug!("Warning: Failed to add specific route for peer {}: {}", peer_ip, e);
+    } else {
+        debug!("Successfully added specific route for peer {} via {} dev {}", peer_ip, gateway, iface);
+    }
 
     debug!("Successfully switched default route to interface {}", iface);
     Ok(())
