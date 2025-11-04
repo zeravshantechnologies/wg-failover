@@ -54,10 +54,6 @@ struct Args {
     #[clap(long)]
     speed_threshold: Option<u8>,
 
-    /// Minimum switch interval in seconds to prevent flapping (default: 30)
-    #[clap(long)]
-    min_switch_interval: Option<u64>,
-
     /// Number of ping attempts for speed tests (default: 3)
     #[clap(long)]
     speed_test_count: Option<u8>,
@@ -76,6 +72,8 @@ struct Config {
     wireguard_config: WireguardConfig,
     #[serde(rename = "interfaces")]
     interface_config: InterfaceConfig,
+    #[serde(rename = "monitoring")]
+    monitoring_config: MonitoringConfig,
 }
 
 #[derive(Debug, Deserialize)]
@@ -94,7 +92,14 @@ struct InterfaceConfig {
     secondary: String,
 }
 
-
+#[derive(Debug, Deserialize)]
+struct MonitoringConfig {
+    interval: Option<u64>,
+    speedtest_interval: Option<u64>,
+    speed_threshold: Option<u8>,
+    speed_test_count: Option<u8>,
+    speed_test_timeout: Option<u8>,
+}
 
 /// Speed test results for an interface
 #[derive(Debug, Clone)]
@@ -495,14 +500,14 @@ fn main() -> Result<()> {
     let primary = args.primary.unwrap_or(config.interface_config.primary);
     let secondary = args.secondary.unwrap_or(config.interface_config.secondary);
     
-    // Use default values for monitoring parameters
-    let interval = args.interval.unwrap_or(30);
+    // Use command line args or config values for monitoring parameters
+    let interval = args.interval.or(config.monitoring_config.interval).unwrap_or(30);
     let count = args.count.unwrap_or(3);
     let timeout = args.timeout.unwrap_or(2);
-    let speedtest_interval = args.speedtest_interval.unwrap_or(300);
-    let speed_threshold = args.speed_threshold.unwrap_or(20);
-    let speed_test_count = args.speed_test_count.unwrap_or(5);
-    let speed_test_timeout = args.speed_test_timeout.unwrap_or(5);
+    let speedtest_interval = args.speedtest_interval.or(config.monitoring_config.speedtest_interval).unwrap_or(300);
+    let speed_threshold = args.speed_threshold.or(config.monitoring_config.speed_threshold).unwrap_or(20);
+    let speed_test_count = args.speed_test_count.or(config.monitoring_config.speed_test_count).unwrap_or(5);
+    let speed_test_timeout = args.speed_test_timeout.or(config.monitoring_config.speed_test_timeout).unwrap_or(5);
     
     info!("WireGuard Failover starting...");
     info!("Peer IP: {}", peer_ip);
