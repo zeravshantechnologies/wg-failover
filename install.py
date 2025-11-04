@@ -24,29 +24,30 @@ CONFIG_DIR = "/etc/wg-failover"
 CONFIG_PATH = f"{CONFIG_DIR}/config.toml"
 LOG_PATH = "/var/log/wg-failover.log"
 
-def print_color(message, color=NC):
+def print_color(message: str, color: str = NC) -> None:
     """Print colored output"""
     print(f"{color}{message}{NC}")
 
-def replace_config_with_latest(new_config_path, existing_config_path):
+def replace_config_with_latest(new_config_path: str, existing_config_path: str) -> None:
     """Replace existing config file with latest version"""
+    backup_path: str | None = None
     try:
         # Create backup of existing config
         backup_path = f"{existing_config_path}.backup"
         if os.path.exists(existing_config_path):
-            shutil.copy2(existing_config_path, backup_path)
-            print_color(f"Backed up existing config to: {backup_path}", YELLOW)
+            _ = shutil.copy2(existing_config_path, backup_path)
+            print_color(f"Backing up current config to: {backup_path}", YELLOW)
         
         # Replace with new config
-        shutil.copy2(new_config_path, existing_config_path)
+        _ = shutil.copy2(new_config_path, existing_config_path)
         os.chmod(existing_config_path, 0o644)
         print_color("Configuration replaced with latest version", GREEN)
         
     except Exception as e:
         print_color(f"Error replacing configuration: {e}", RED)
         # Try to restore from backup if replacement failed
-        if os.path.exists(backup_path):
-            shutil.copy2(backup_path, existing_config_path)
+        if backup_path and os.path.exists(backup_path):
+            _ = shutil.copy2(backup_path, existing_config_path)
             print_color("Restored configuration from backup", YELLOW)
 
 def check_root():
@@ -105,26 +106,26 @@ def get_current_version():
     except (subprocess.CalledProcessError, FileNotFoundError):
         return None
 
-def backup_config():
+def backup_config() -> str | None:
     """Backup existing configuration"""
-    if os.path.exists(CONFIG_PATH):
+    if os.path.exists(CONFIG_PATH) and os.path.getsize(CONFIG_PATH) > 0:
         backup_path = f"{CONFIG_PATH}.backup"
         print_color(f"Backing up existing configuration to {backup_path}...", YELLOW)
-        shutil.copy2(CONFIG_PATH, backup_path)
+        _ = shutil.copy2(CONFIG_PATH, backup_path)
         print_color("Configuration backup created", GREEN)
         return backup_path
     return None
 
-def restore_config():
+def restore_config() -> None:
     """Restore configuration from backup"""
     backup_path = f"{CONFIG_PATH}.backup"
     if os.path.exists(backup_path):
         print_color("Restoring configuration from backup...", YELLOW)
-        shutil.copy2(backup_path, CONFIG_PATH)
+        _ = shutil.copy2(backup_path, CONFIG_PATH)
         os.remove(backup_path)
         print_color("Configuration restored", GREEN)
 
-def stop_service():
+def stop_service() -> bool:
     """Stop the wg-failover service"""
     print_color("Stopping wg-failover service...", YELLOW)
     try:
@@ -135,13 +136,13 @@ def stop_service():
         else:
             print_color(f"Service stop failed: {result.stderr}", YELLOW)
             # Force kill any remaining processes
-            subprocess.run(['pkill', '-f', 'wg-failover'], capture_output=True)
+            _ = subprocess.run(['pkill', '-f', 'wg-failover'], capture_output=True)
             return False
     except Exception as e:
         print_color(f"Error stopping service: {e}", YELLOW)
         return False
 
-def start_service():
+def start_service() -> bool:
     """Start the wg-failover service"""
     print_color("Starting wg-failover service...", YELLOW)
     try:
@@ -164,7 +165,7 @@ def start_service():
         print_color(f"Error starting service: {e}", RED)
         return False
 
-def enable_service():
+def enable_service() -> bool:
     """Enable the wg-failover service to start on boot"""
     print_color("Enabling wg-failover service...", YELLOW)
     try:
@@ -179,7 +180,7 @@ def enable_service():
         print_color(f"Warning: Could not enable service: {e}", YELLOW)
         return False
 
-def local_install(current_dir, is_update=False):
+def local_install(current_dir: str, is_update: bool) -> None:
     """Perform local installation or update"""
     if is_update:
         print_color("=== Updating WireGuard Failover ===", BLUE)
@@ -194,10 +195,10 @@ def local_install(current_dir, is_update=False):
             print_color("Updating existing installation", BLUE)
         
         # Backup configuration before update
-        backup_config()
+        _ = backup_config()
         
         # Stop service before update
-        was_running = stop_service()
+        was_running: bool = stop_service()
     else:
         print_color("=== Installing WireGuard Failover Locally ===", GREEN)
         was_running = False
@@ -205,7 +206,7 @@ def local_install(current_dir, is_update=False):
     # Check for required commands
     print_color("Checking dependencies...", GREEN)
     required_commands = ['ip', 'systemctl', 'nmcli']
-    missing_commands = []
+    missing_commands: list[str] = []
     for cmd in required_commands:
         if not shutil.which(cmd):
             missing_commands.append(cmd)
@@ -226,7 +227,7 @@ def local_install(current_dir, is_update=False):
         sys.exit(1)
     
     print_color(f"Installing binary to {BINARY_PATH}...", GREEN)
-    shutil.copy(binary_src, BINARY_PATH)
+    _ = shutil.copy(binary_src, BINARY_PATH)
     os.chmod(BINARY_PATH, 0o755)
     print_color("Binary installed successfully", GREEN)
     
@@ -239,9 +240,9 @@ def local_install(current_dir, is_update=False):
         sys.exit(1)
     
     print_color(f"Installing systemd service to {SERVICE_PATH}...", GREEN)
-    shutil.copy(service_src, SERVICE_PATH)
+    _ = shutil.copy(service_src, SERVICE_PATH)
     os.chmod(SERVICE_PATH, 0o644)
-    subprocess.run(['systemctl', 'daemon-reload'], check=True)
+    _ = subprocess.run(['systemctl', 'daemon-reload'], check=True)
     print_color("Service installed successfully", GREEN)
     
     # Install configuration - always replace with latest version
@@ -271,7 +272,7 @@ def local_install(current_dir, is_update=False):
     
     # Set permissions
     os.chmod(CONFIG_DIR, 0o755)
-    if os.path.exists(CONFIG_PATH):
+    if os.path.exists(CONFIG_PATH) and os.path.getsize(CONFIG_PATH) > 0:
         os.chmod(CONFIG_PATH, 0o644)
     if os.path.exists(SERVICE_PATH):
         os.chmod(SERVICE_PATH, 0o644)
@@ -280,10 +281,10 @@ def local_install(current_dir, is_update=False):
     
     # Start service if it was running or if this is a new installation
     if was_running or not is_update:
-        start_service()
+        _ = start_service()
     
     # Enable service for automatic startup
-    enable_service()
+    _ = enable_service()
     
     print()
     if is_update:
@@ -308,7 +309,7 @@ def local_install(current_dir, is_update=False):
     else:
         print_color("Please edit the configuration file to match your setup!", YELLOW)
 
-def remote_install(target_ip, private_key, username, sudo_password, is_update=False):
+def remote_install(target_ip: str, private_key: str, username: str, sudo_password: str, is_update: bool) -> None:
     """Perform remote installation or update via SSH with sudo"""
     if is_update:
         print_color(f"=== Updating WireGuard Failover Remotely on {target_ip} ===", BLUE)
@@ -316,13 +317,13 @@ def remote_install(target_ip, private_key, username, sudo_password, is_update=Fa
         print_color(f"=== Installing WireGuard Failover Remotely on {target_ip} ===", GREEN)
     
     # Create SSH command prefix
-    ssh_cmd = ['ssh', '-i', private_key, f"{username}@{target_ip}"]
-    scp_cmd = ['scp', '-i', private_key]
+    ssh_cmd: list[str] = ["ssh", "-i", private_key, f"{username}@{target_ip}"]
+    scp_cmd: list[str] = ["scp", "-i", private_key]
     
     # Check if we can connect
     print_color("Testing SSH connection...", GREEN)
     try:
-        subprocess.run(ssh_cmd + ['echo', 'Connected successfully'], check=True, capture_output=True)
+        _ = subprocess.run(ssh_cmd + ['echo', 'Connected successfully'], check=True, capture_output=True)
         print_color("SSH connection successful", GREEN)
     except subprocess.CalledProcessError:
         print_color(f"Error: Could not connect to {target_ip} via SSH", RED)
@@ -352,19 +353,19 @@ def remote_install(target_ip, private_key, username, sudo_password, is_update=Fa
     remote_temp_dir = "/tmp/wg-failover-install"
     
     # Create temp directory on remote server
-    subprocess.run(ssh_cmd + ['mkdir', '-p', remote_temp_dir], check=True)
+    _ = subprocess.run(ssh_cmd + ['mkdir', '-p', remote_temp_dir], check=True)
     
     # Copy all required files to remote server
     for file in required_files:
         local_file = os.path.join(current_dir, file)
-        subprocess.run(scp_cmd + [local_file, f"{username}@{target_ip}:{remote_temp_dir}/"], check=True)
+        _ = subprocess.run(scp_cmd + [local_file, f"{username}@{target_ip}:{remote_temp_dir}/"], check=True)
     
     # Copy wg-failover executable
-    subprocess.run(scp_cmd + [wg_failover_exe, f"{username}@{target_ip}:{remote_temp_dir}/"], check=True)
+    _ = subprocess.run(scp_cmd + [wg_failover_exe, f"{username}@{target_ip}:{remote_temp_dir}/"], check=True)
     
     # Copy install script
     install_script = os.path.join(current_dir, 'install.py')
-    subprocess.run(scp_cmd + [install_script, f"{username}@{target_ip}:{remote_temp_dir}/"], check=True)
+    _ = subprocess.run(scp_cmd + [install_script, f"{username}@{target_ip}:{remote_temp_dir}/"], check=True)
     
     # Create installation script
     install_mode = "--update" if is_update else "--local"
@@ -391,13 +392,13 @@ fi
     
     # Write the sudo script to a temporary file
     with tempfile.NamedTemporaryFile(mode='w', suffix='.sh', delete=False) as f:
-        f.write(sudo_script_content)
+        _ = f.write(sudo_script_content)
         sudo_script_path = f.name
     
     # Make the script executable and copy it to remote server
-    os.chmod(sudo_script_path, 0o755)
-    subprocess.run(scp_cmd + [sudo_script_path, f"{username}@{target_ip}:{remote_temp_dir}/install_with_sudo.sh"], check=True)
-    os.unlink(sudo_script_path)  # Clean up temporary file
+    _ = os.chmod(sudo_script_path, 0o755)
+    _ = subprocess.run(scp_cmd + [sudo_script_path, f"{username}@{target_ip}:{remote_temp_dir}/install_with_sudo.sh"], check=True)
+    _ = os.unlink(sudo_script_path)  # Clean up temporary file
     
     # Run installation on remote server with sudo
     print_color("Running installation on remote server...", GREEN)
@@ -408,7 +409,7 @@ fi
         if is_update:
             print_color("Remote update completed successfully", BLUE)
         else:
-            print_color("Remote installation completed successfully", GREEN)
+            print_color("Remote installation completed successfully!", GREEN)
         print(result.stdout)
     else:
         if is_update:
@@ -426,7 +427,7 @@ fi
     
     # Cleanup temporary files
     print_color("Cleaning up temporary files...", GREEN)
-    subprocess.run(ssh_cmd + ['rm', '-rf', remote_temp_dir], check=True)
+    _ = subprocess.run(ssh_cmd + ['rm', '-rf', remote_temp_dir], capture_output=True)
     
     if is_update:
         print_color("=== Remote Update Complete ===", BLUE)
@@ -434,30 +435,30 @@ fi
         print_color("=== Remote Installation Complete ===", GREEN)
     print_color(f"WireGuard Failover has been {'updated' if is_update else 'installed'} on {target_ip}", GREEN)
 
-def main():
-    parser = argparse.ArgumentParser(description='WireGuard Failover Installer')
-    parser.add_argument('--remote', action='store_true', help='Install on remote server')
-    parser.add_argument('--local', action='store_true', help='Install locally (default)')
-    parser.add_argument('--update', action='store_true', help='Update existing installation')
-    parser.add_argument('--target-ip', help='Target server IP for remote installation')
-    parser.add_argument('--private-key', help='Private key file for SSH authentication')
-    parser.add_argument('--username', help='Username for SSH connection (default: current user)')
-    parser.add_argument('--sudo-password', help='Sudo password for remote installation')
+def main() -> None:
+    parser: argparse.ArgumentParser = argparse.ArgumentParser(description='WireGuard Failover Installer')
+    _ = parser.add_argument('--remote', action='store_true', help='Install on remote server')
+    _ = parser.add_argument('--local', action='store_true', help='Install locally (default)')
+    _ = parser.add_argument('--update', action='store_true', help='Update existing installation')
+    _ = parser.add_argument('--target-ip', help='Target server IP for remote installation')
+    _ = parser.add_argument('--private-key', help='Private key file for SSH authentication')
+    _ = parser.add_argument('--username', help='Username for SSH connection (default: current user)')
+    _ = parser.add_argument('--sudo-password', help='Sudo password for remote installation')
     
-    args = parser.parse_args()
+    args: argparse.Namespace = parser.parse_args()
     
     # Get current directory
-    current_dir = os.path.dirname(os.path.realpath(__file__))
+    current_dir: str = os.path.dirname(os.path.realpath(__file__))
     
     # Check if this is an update
-    is_update = args.update
+    is_update: bool = getattr(args, 'update', False)
     
     # If no mode specified and already installed, suggest update
-    if not args.remote and not args.local and not args.update:
+    if not getattr(args, 'remote', False) and not getattr(args, 'local', False) and not getattr(args, 'update', False):
         if is_installed():
-            print_color("WireGuard Failover is already installed.", YELLOW)
-            installed_version = get_installed_version()
-            current_version = get_current_version()
+            print_color("WireGuard Failover is already installed.", GREEN)
+            installed_version: str | None = get_installed_version()
+            current_version: str | None = get_current_version()
             
             if installed_version and current_version and installed_version != current_version:
                 print_color(f"Current version: {installed_version}", YELLOW)
@@ -473,25 +474,25 @@ def main():
                 sys.exit(0)
     
     # Handle remote installation/update
-    if args.remote:
-        if not args.target_ip or not args.private_key:
+    if getattr(args, 'remote', False):
+        if not getattr(args, 'target_ip', None) or not getattr(args, 'private_key', None):
             print_color("For remote installation, --target-ip and --private-key are required", RED)
             sys.exit(1)
         
         # Validate private key file exists
-        if not os.path.exists(args.private_key):
-            print_color(f"Error: Private key file '{args.private_key}' not found", RED)
+        if not os.path.exists(getattr(args, 'private_key', '')):
+            print_color(f"Error: Private key file '{getattr(args, 'private_key', '')}' not found", RED)
             sys.exit(1)
         
         # Get username if not provided
-        username = args.username if args.username else getpass.getuser()
+        username: str = getattr(args, 'username', '') or getpass.getuser()
         
         # Get sudo password if not provided
-        sudo_password = args.sudo_password
+        sudo_password: str = getattr(args, 'sudo_password', '')
         if not sudo_password:
             sudo_password = getpass.getpass("Enter sudo password for remote server: ")
         
-        remote_install(args.target_ip, args.private_key, username, sudo_password, is_update)
+        remote_install(getattr(args, 'target_ip', ''), getattr(args, 'private_key', ''), username, sudo_password, is_update)
         return
     
     # Handle local installation/update

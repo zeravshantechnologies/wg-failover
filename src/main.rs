@@ -35,36 +35,36 @@ struct Args {
     secondary: Option<String>,
 
     /// Connectivity check interval in seconds
-    #[clap(short = 't', long, default_value = "30")]
-    interval: u64,
+    #[clap(short = 't', long)]
+    interval: Option<u64>,
 
     /// Number of ping attempts
-    #[clap(short = 'n', long, default_value = "2")]
-    count: u8,
+    #[clap(short = 'n', long)]
+    count: Option<u8>,
 
     /// Ping timeout in seconds
-    #[clap(long, default_value = "2")]
-    timeout: u8,
+    #[clap(long)]
+    timeout: Option<u8>,
 
     /// Speed test interval in seconds (default: 3600 = 1 hour)
-    #[clap(long, default_value = "3600")]
-    speedtest_interval: u64,
+    #[clap(long)]
+    speedtest_interval: Option<u64>,
 
     /// Speed threshold percentage to switch to faster interface (default: 35)
-    #[clap(long, default_value = "35")]
-    speed_threshold: u8,
+    #[clap(long)]
+    speed_threshold: Option<u8>,
 
     /// Minimum switch interval in seconds to prevent flapping (default: 30)
-    #[clap(long, default_value = "30")]
-    min_switch_interval: u64,
+    #[clap(long)]
+    min_switch_interval: Option<u64>,
 
     /// Number of ping attempts for speed tests (default: 3)
-    #[clap(long, default_value = "3")]
-    speed_test_count: u8,
+    #[clap(long)]
+    speed_test_count: Option<u8>,
 
     /// Ping timeout in seconds for speed tests (default: 5)
-    #[clap(long, default_value = "5")]
-    speed_test_timeout: u8,
+    #[clap(long)]
+    speed_test_timeout: Option<u8>,
 }
 
 /// Configuration file structure
@@ -76,15 +76,11 @@ struct Config {
     wireguard_config: WireguardConfig,
     #[serde(rename = "interfaces")]
     interface_config: InterfaceConfig,
-    #[serde(rename = "monitoring")]
-    monitoring_config: MonitoringConfig,
 }
 
 #[derive(Debug, Deserialize)]
 struct PeerConfig {
     ip: String,
-    count: Option<u8>,
-    timeout: Option<u8>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -98,23 +94,13 @@ struct InterfaceConfig {
     secondary: String,
 }
 
-#[derive(Debug, Deserialize)]
-struct MonitoringConfig {
-    interval: Option<u64>,
-    speedtest_interval: Option<u64>,
-    speed_threshold: Option<u8>,
-    min_switch_interval: Option<u64>,
-    speed_test_count: Option<u8>,
-    speed_test_timeout: Option<u8>,
-}
+
 
 /// Speed test results for an interface
 #[derive(Debug, Clone)]
 struct SpeedTestResult {
     interface: String,
     download_speed: f64, // in Mbps
-    upload_speed: f64,   // in Mbps
-    latency: f64,        // in ms
 }
 
 fn log_with_timestamp(msg: &str) {
@@ -261,16 +247,12 @@ fn perform_speed_test(iface: &str, peer_ip: &str, speed_test_count: u8, speed_te
         5.0
     };
 
-    let upload_speed = download_speed * 0.8;
-
-    info!("Speed test results for {}: {:.2} Mbps down, {:.2} Mbps up, {:.1} ms latency",
-           iface, download_speed, upload_speed, latency);
+    info!("Speed test results for {}: {:.2} Mbps down",
+           iface, download_speed);
 
     Some(SpeedTestResult {
         interface: iface.to_string(),
         download_speed,
-        upload_speed,
-        latency,
     })
 }
 
@@ -512,14 +494,15 @@ fn main() -> Result<()> {
     let wg_interface = args.wg_interface.unwrap_or(config.wireguard_config.interface);
     let primary = args.primary.unwrap_or(config.interface_config.primary);
     let secondary = args.secondary.unwrap_or(config.interface_config.secondary);
-    let interval = args.interval;
-    let count = args.count;
-    let timeout = args.timeout;
-    let speedtest_interval = args.speedtest_interval;
-    let speed_threshold = args.speed_threshold;
-
-    let speed_test_count = args.speed_test_count;
-    let speed_test_timeout = args.speed_test_timeout;
+    
+    // Use default values for monitoring parameters
+    let interval = args.interval.unwrap_or(30);
+    let count = args.count.unwrap_or(3);
+    let timeout = args.timeout.unwrap_or(2);
+    let speedtest_interval = args.speedtest_interval.unwrap_or(300);
+    let speed_threshold = args.speed_threshold.unwrap_or(20);
+    let speed_test_count = args.speed_test_count.unwrap_or(5);
+    let speed_test_timeout = args.speed_test_timeout.unwrap_or(5);
     
     info!("WireGuard Failover starting...");
     info!("Peer IP: {}", peer_ip);
