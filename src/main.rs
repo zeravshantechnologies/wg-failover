@@ -108,6 +108,20 @@ struct SpeedTestResult {
     download_speed: f64, // in Mbps
 }
 
+/// Context for failover operations grouping all necessary parameters
+#[derive(Debug, Clone)]
+struct FailoverContext {
+    wg_interface: String,
+    primary: String,
+    secondary: String,
+    peer_ip: String,
+    count: u8,
+    timeout: u8,
+    speed_threshold: u8,
+    speed_test_count: u8,
+    speed_test_timeout: u8,
+}
+
 fn log_with_timestamp(msg: &str) {
     info!("[{}] {}", Local::now().format("%Y-%m-%d %H:%M:%S"), msg);
 }
@@ -288,139 +302,129 @@ fn should_switch_to_faster_interface(
 }
 
 /// Main failover logic using interface up/down approach
-fn perform_failover_check(
-    wg_interface: &str,
-    primary: &str,
-    secondary: &str,
-    peer_ip: &str,
-    count: u8,
-    timeout: u8,
-    speed_threshold: u8,
-    speed_test_count: u8,
-    speed_test_timeout: u8,
-) -> Result<()> {
+fn perform_failover_check(context: &FailoverContext) -> Result<()> {
     log_with_timestamp("🔄 Performing failover check");
     
     // Check current interface states
-    let primary_up = is_interface_up(primary);
-    let secondary_up = is_interface_up(secondary);
+    let primary_up = is_interface_up(&context.primary);
+    let secondary_up = is_interface_up(&context.secondary);
     
     info!("Interface states - {}: {}, {}: {}", 
-          primary, if primary_up { "UP" } else { "DOWN" },
-          secondary, if secondary_up { "UP" } else { "DOWN" });
+          context.primary, if primary_up { "UP" } else { "DOWN" },
+          context.secondary, if secondary_up { "UP" } else { "DOWN" });
     
     // Test connectivity for currently up interfaces
     let primary_connectivity = if primary_up { 
-        ping_interface(primary, peer_ip, count, timeout) 
+        ping_interface(&context.primary, &context.peer_ip, context.count, context.timeout) 
     } else { 
         false 
     };
     
     let secondary_connectivity = if secondary_up { 
-        ping_interface(secondary, peer_ip, count, timeout) 
+        ping_interface(&context.secondary, &context.peer_ip, context.count, context.timeout) 
     } else { 
         false 
     };
     
     info!("Connectivity - {}: {}, {}: {}", 
-          primary, if primary_connectivity { "OK" } else { "FAIL" },
-          secondary, if secondary_connectivity { "OK" } else { "FAIL" });
+          context.primary, if primary_connectivity { "OK" } else { "FAIL" },
+          context.secondary, if secondary_connectivity { "OK" } else { "FAIL" });
     
     // Handle connectivity failures
     if !primary_connectivity && primary_up {
-        log_with_timestamp(&format!("❌ Primary interface {} lost connectivity", primary));
-        bring_interface_down(primary)?;
+        log_with_timestamp(&format!("❌ Primary interface {} lost connectivity", context.primary));
+        bring_interface_down(&context.primary)?;
     }
     
     if !secondary_connectivity && secondary_up {
-        log_with_timestamp(&format!("❌ Secondary interface {} lost connectivity", secondary));
-        bring_interface_down(secondary)?;
+        log_with_timestamp(&format!("❌ Secondary interface {} lost connectivity", context.secondary));
+        bring_interface_down(&context.secondary)?;
     }
     
     // Handle interface recovery
     if !primary_up && !primary_connectivity {
         // Try to bring up primary if it's down and we don't know its connectivity
-        log_with_timestamp(&format!("🔄 Attempting to recover interface {}", primary));
-        if let Ok(()) = bring_interface_up(primary) {
+        log_with_timestamp(&format!("🔄 Attempting to recover interface {}", context.primary));
+        if let Ok(()) = bring_interface_up(&context.primary) {
             thread::sleep(time::Duration::from_secs(3));
-            let connectivity = ping_interface(primary, peer_ip, count, timeout);
+            let connectivity = ping_interface(&context.primary, &context.peer_ip, context.count, context.timeout);
             if !connectivity {
-                bring_interface_down(primary)?;
+                bring_interface_down(&context.primary)?;
             }
         }
     }
     
     if !secondary_up && !secondary_connectivity {
         // Try to bring up secondary if it's down and we don't know its connectivity
-        log_with_timestamp(&format!("🔄 Attempting to recover interface {}", secondary));
-        if let Ok(()) = bring_interface_up(secondary) {
+        log_with_timestamp(&format!("🔄 Attempting to recover interface {}", context.secondary));
+        if let Ok(()) = bring_interface_up(&context.secondary) {
             thread::sleep(time::Duration::from_secs(3));
-            let connectivity = ping_interface(secondary, peer_ip, count, timeout);
+            let connectivity = ping_interface(&context.secondary, &context.peer_ip, context.count, context.timeout);
             if !connectivity {
-                bring_interface_down(secondary)?;
+                bring_interface_down(&context.secondary)?;
             }
         }
     }
     
     // Determine which interfaces are currently working
-    let current_primary_up = is_interface_up(primary);
-    let current_secondary_up = is_interface_up(secondary);
+    let current_primary_up = is_interface_up(&context.primary);
+    let current_secondary_up = is_interface_up(&context.secondary);
     
-    let primary_working = current_primary_up && ping_interface(primary, peer_ip, count, timeout);
-    let secondary_working = current_secondary_up && ping_interface(secondary, peer_ip, count, timeout);
+    let primary_working = current_primary_up && ping_interface(&context.primary, &context.peer_ip, context.count, context.timeout);
+    let secondary_working = current_secondary_up && ping_interface(&context.secondary, &context.peer_ip, context.count, context.timeout);
     
     // Speed optimization logic
     if primary_working && secondary_working {
         log_with_timestamp("⚡ Both interfaces working - performing speed optimization");
         
-        let primary_speed = perform_speed_test(primary, peer_ip, speed_test_count, speed_test_timeout);
-        let secondary_speed = perform_speed_test(secondary, peer_ip, speed_test_count, speed_test_timeout);
+        let primary_speed = perform_speed_test(&context.primary, &context.peer_ip, context.speed_test_count, context.speed_test_timeout);
+        let secondary_speed = perform_speed_test(&context.secondary, &context.peer_ip, context.speed_test_count, context.speed_test_timeout);
         
         if let (Some(primary_result), Some(secondary_result)) = (primary_speed, secondary_speed) {
             if let Some(faster_interface) = should_switch_to_faster_interface(
                 &primary_result, 
                 &secondary_result, 
-                speed_threshold
+                context.speed_threshold
             ) {
-                if faster_interface == secondary {
-                    log_with_timestamp(&format!("🚀 Switching to faster interface: {}", secondary));
-                    bring_interface_down(primary)?;
+                if faster_interface == context.secondary {
+                    log_with_timestamp(&format!("🚀 Switching to faster interface: {}", context.secondary));
+                    bring_interface_down(&context.primary)?;
                 } else {
-                    log_with_timestamp(&format!("🚀 Keeping primary interface: {}", primary));
-                    bring_interface_down(secondary)?;
+                    log_with_timestamp(&format!("🚀 Keeping primary interface: {}", context.primary));
+                    bring_interface_down(&context.secondary)?;
                 }
                 
                 // Restart WireGuard to pick up the new interface
-                restart_wireguard_interface(wg_interface)?;
+                restart_wireguard_interface(&context.wg_interface)?;
             }
         }
     } else if !primary_working && secondary_working {
         // Only secondary is working
-        log_with_timestamp(&format!("🔄 Switching to secondary interface: {}", secondary));
+        log_with_timestamp(&format!("🔄 Switching to secondary interface: {}", context.secondary));
         if current_primary_up {
-            bring_interface_down(primary)?;
+            bring_interface_down(&context.primary)?;
         }
-        bring_interface_up(secondary)?;
-        restart_wireguard_interface(wg_interface)?;
+        bring_interface_up(&context.secondary)?;
+        restart_wireguard_interface(&context.wg_interface)?;
     } else if primary_working && !secondary_working {
         // Only primary is working
-        log_with_timestamp(&format!("✅ Primary interface working: {}", primary));
+        log_with_timestamp(&format!("✅ Primary interface working: {}", context.primary));
         if current_secondary_up {
-            bring_interface_down(secondary)?;
+            bring_interface_down(&context.secondary)?;
         }
         // Ensure primary is up
         if !current_primary_up {
-            bring_interface_up(primary)?;
-            restart_wireguard_interface(wg_interface)?;
+            bring_interface_up(&context.primary)?;
+            restart_wireguard_interface(&context.wg_interface)?;
         }
     } else {
         // No interfaces working
         log_with_timestamp("❌ No working interfaces found");
         // Try to recover primary interface
-        log_with_timestamp(&format!("🔄 Attempting emergency recovery of {}", primary));
-        if let Ok(()) = bring_interface_up(primary) {
+        log_with_timestamp(&format!("🔄 Attempting emergency recovery of {}", context.primary));
+        if let Ok(()) = bring_interface_up(&context.primary) {
             thread::sleep(time::Duration::from_secs(5));
-            restart_wireguard_interface(wg_interface)?;
+            restart_wireguard_interface(&context.wg_interface)?;
         }
     }
     
@@ -428,50 +432,50 @@ fn perform_failover_check(
 }
 
 /// Initialize interfaces at startup
-fn initialize_interfaces(primary: &str, secondary: &str, wg_interface: &str, peer_ip: &str, count: u8, timeout: u8) -> Result<()> {
+fn initialize_interfaces(context: &FailoverContext) -> Result<()> {
     log_with_timestamp("🚀 Initializing interfaces for failover");
     
     // Ensure WireGuard is up
-    if !is_interface_up(wg_interface) {
-        log_with_timestamp(&format!("🔺 Bringing up WireGuard interface {}", wg_interface));
+    if !is_interface_up(&context.wg_interface) {
+        log_with_timestamp(&format!("🔺 Bringing up WireGuard interface {}", context.wg_interface));
         Command::new("nmcli")
-            .args(["connection", "up", wg_interface])
+            .args(["connection", "up", &context.wg_interface])
             .output()
             .context("Failed to bring up WireGuard interface")?;
         thread::sleep(time::Duration::from_secs(3));
     }
     
     // Test primary interface first
-    log_with_timestamp(&format!("🔍 Testing primary interface {}", primary));
-    let primary_connectivity = ping_interface(primary, peer_ip, count, timeout);
+    log_with_timestamp(&format!("🔍 Testing primary interface {}", context.primary));
+    let primary_connectivity = ping_interface(&context.primary, &context.peer_ip, context.count, context.timeout);
     
     if primary_connectivity {
-        log_with_timestamp(&format!("✅ Primary interface {} is working", primary));
+        log_with_timestamp(&format!("✅ Primary interface {} is working", context.primary));
         // Ensure primary is up and secondary is down
-        if !is_interface_up(primary) {
-            bring_interface_up(primary)?;
+        if !is_interface_up(&context.primary) {
+            bring_interface_up(&context.primary)?;
         }
-        if is_interface_up(secondary) {
-            bring_interface_down(secondary)?;
+        if is_interface_up(&context.secondary) {
+            bring_interface_down(&context.secondary)?;
         }
     } else {
-        log_with_timestamp(&format!("❌ Primary interface {} failed, testing secondary", primary));
+        log_with_timestamp(&format!("❌ Primary interface {} failed, testing secondary", context.primary));
         // Test secondary interface
-        let secondary_connectivity = ping_interface(secondary, peer_ip, count, timeout);
+        let secondary_connectivity = ping_interface(&context.secondary, &context.peer_ip, context.count, context.timeout);
         
         if secondary_connectivity {
-            log_with_timestamp(&format!("✅ Secondary interface {} is working", secondary));
+            log_with_timestamp(&format!("✅ Secondary interface {} is working", context.secondary));
             // Bring up secondary and down primary
-            bring_interface_up(secondary)?;
-            if is_interface_up(primary) {
-                bring_interface_down(primary)?;
+            bring_interface_up(&context.secondary)?;
+            if is_interface_up(&context.primary) {
+                bring_interface_down(&context.primary)?;
             }
-            restart_wireguard_interface(wg_interface)?;
+            restart_wireguard_interface(&context.wg_interface)?;
         } else {
             log_with_timestamp("❌ No working interfaces found at startup");
             // Emergency: try to bring up primary anyway
-            bring_interface_up(primary)?;
-            restart_wireguard_interface(wg_interface)?;
+            bring_interface_up(&context.primary)?;
+            restart_wireguard_interface(&context.wg_interface)?;
         }
     }
     
@@ -517,8 +521,21 @@ fn main() -> Result<()> {
     info!("Check Interval: {}s", interval);
     info!("Speed Test Interval: {}s", speedtest_interval);
     
+    // Create failover context
+    let context = FailoverContext {
+        wg_interface: wg_interface.clone(),
+        primary: primary.clone(),
+        secondary: secondary.clone(),
+        peer_ip: peer_ip.clone(),
+        count,
+        timeout,
+        speed_threshold,
+        speed_test_count,
+        speed_test_timeout,
+    };
+    
     // Initialize interfaces
-    initialize_interfaces(&primary, &secondary, &wg_interface, &peer_ip, count, timeout)?;
+    initialize_interfaces(&context)?;
     
     let mut last_speed_test = std::time::Instant::now();
 
@@ -530,18 +547,15 @@ fn main() -> Result<()> {
         // Check if we should perform speed test
         let should_speed_test = now.duration_since(last_speed_test).as_secs() >= speedtest_interval;
         
+        // Create context for this check (adjust speed test parameters if needed)
+        let mut check_context = context.clone();
+        if !should_speed_test {
+            check_context.speed_test_count = 1;
+            check_context.speed_test_timeout = timeout;
+        }
+        
         // Perform failover check
-        if let Err(e) = perform_failover_check(
-            &wg_interface,
-            &primary,
-            &secondary,
-            &peer_ip,
-            count,
-            timeout,
-            speed_threshold,
-            if should_speed_test { speed_test_count } else { 1 },
-            if should_speed_test { speed_test_timeout } else { timeout },
-        ) {
+        if let Err(e) = perform_failover_check(&check_context) {
             error!("Failover check failed: {}", e);
         }
         

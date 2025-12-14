@@ -43,13 +43,13 @@ interface = "wg0"
 # recover to this interface when it becomes available.
 # Example: primary = "eth0" (Ethernet)
 # Example: primary = "enp0s31f6" (specific Ethernet port)
-primary = "enp10s0"
+primary = "enp0s31f6"
 
 # Secondary network interface (fallback interface).
 # This interface will be used when the primary interface loses connectivity.
 # Example: secondary = "wlan0" (WiFi)
 # Example: secondary = "wwp0s20u4i6" (cellular modem)
-secondary = "enp2s0f0u2"
+secondary = "enp0s20f0u3"
 
 # Monitoring Configuration
 # ------------------------
@@ -67,7 +67,7 @@ interval = 30
 # Speed tests help optimize performance by switching to faster interfaces.
 # Example: speedtest_interval = 300 (test every 5 minutes)
 # Example: speedtest_interval = 3600 (test every hour)
-speedtest_interval = 1800
+speedtest_interval = 300
 
 # Speed threshold percentage to switch to faster interface.
 # Minimum percentage improvement required to switch from primary to secondary.
