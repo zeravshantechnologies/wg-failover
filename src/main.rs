@@ -3,15 +3,13 @@ use chrono::Local;
 use clap::Parser;
 use log::{error, info, debug, warn};
 use serde::Deserialize;
-use std::{thread, time};
-
-use std::process::Command;
-
 use std::path::PathBuf;
+use std::process::Command;
+use std::thread;
+use std::time::{Duration, Instant};
 
-/// WireGuard Failover - A utility for ensuring optimal WireGuard VPN connectivity
-/// by managing interface state based on connectivity and speed optimization
-#[derive(Parser, Debug)]
+/// WireGuard Failover - Metric-based routing manager
+#[derive(Parser, Debug, Clone)]
 #[clap(author, version, about)]
 struct Args {
     /// The IP address or hostname of the WireGuard peer
@@ -22,15 +20,11 @@ struct Args {
     #[clap(long)]
     config: Option<PathBuf>,
 
-    /// WireGuard interface name (e.g., wg0)
-    #[clap(short = 'w', long)]
-    wg_interface: Option<String>,
-
-    /// Primary network interface (e.g., eth0, enp0s31f6)
+    /// Primary network interface (e.g., eth0)
     #[clap(short = 'p', long)]
     primary: Option<String>,
 
-    /// Secondary network interface (e.g., wlan0, wlp0s20f0u5)
+    /// Secondary network interface (e.g., wlan0)
     #[clap(short = 's', long)]
     secondary: Option<String>,
 
@@ -38,533 +32,346 @@ struct Args {
     #[clap(short = 't', long)]
     interval: Option<u64>,
 
-    /// Number of ping attempts
-    #[clap(short = 'n', long)]
-    count: Option<u8>,
-
-    /// Ping timeout in seconds
-    #[clap(long)]
-    timeout: Option<u8>,
-
-    /// Speed test interval in seconds (default: 3600 = 1 hour)
+    /// Speed test interval in seconds
     #[clap(long)]
     speedtest_interval: Option<u64>,
 
-    /// Speed threshold percentage to switch to faster interface (default: 35)
+    /// Speed threshold percentage to switch to faster interface
     #[clap(long)]
     speed_threshold: Option<u8>,
-
-    /// Number of ping attempts for speed tests (default: 3)
-    #[clap(long)]
-    speed_test_count: Option<u8>,
-
-    /// Ping timeout in seconds for speed tests (default: 5)
-    #[clap(long)]
-    speed_test_timeout: Option<u8>,
 }
 
-/// Configuration file structure
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, Clone)]
 struct Config {
-    #[serde(rename = "peer")]
-    peer_config: PeerConfig,
-    #[serde(rename = "wireguard")]
-    wireguard_config: WireguardConfig,
-    #[serde(rename = "interfaces")]
-    interface_config: InterfaceConfig,
-    #[serde(rename = "monitoring")]
-    monitoring_config: MonitoringConfig,
+    peer: Option<PeerConfig>,
+    interfaces: Option<InterfaceConfig>,
+    monitoring: Option<MonitoringConfig>,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, Clone)]
 struct PeerConfig {
-    ip: String,
+    ip: Option<String>,
 }
 
-#[derive(Debug, Deserialize)]
-struct WireguardConfig {
-    interface: String,
-}
-
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, Clone)]
 struct InterfaceConfig {
-    primary: String,
-    secondary: String,
+    primary: Option<String>,
+    secondary: Option<String>,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, Clone)]
 struct MonitoringConfig {
     interval: Option<u64>,
     speedtest_interval: Option<u64>,
     speed_threshold: Option<u8>,
-    speed_test_count: Option<u8>,
-    speed_test_timeout: Option<u8>,
 }
 
-/// Speed test results for an interface
 #[derive(Debug, Clone)]
-struct SpeedTestResult {
-    interface: String,
-    download_speed: f64, // in Mbps
-}
-
-/// Context for failover operations grouping all necessary parameters
-#[derive(Debug, Clone)]
-struct FailoverContext {
-    wg_interface: String,
-    primary: String,
-    secondary: String,
+struct AppState {
     peer_ip: String,
-    count: u8,
-    timeout: u8,
+    primary_iface: String,
+    secondary_iface: String,
+    check_interval: Duration,
+    speed_check_interval: Duration,
     speed_threshold: u8,
-    speed_test_count: u8,
-    speed_test_timeout: u8,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+enum InterfaceStatus {
+    Working,
+    Failed,
+    Unknown,
+}
+
+#[derive(Debug, Clone)]
+struct InterfaceMetrics {
+    status: InterfaceStatus,
+    connectivity_latency_ms: f64,
+    speed_latency_ms: f64,
+}
+
+impl Default for InterfaceMetrics {
+    fn default() -> Self {
+        Self {
+            status: InterfaceStatus::Unknown,
+            connectivity_latency_ms: 0.0,
+            speed_latency_ms: 0.0,
+        }
+    }
 }
 
 fn log_with_timestamp(msg: &str) {
     info!("[{}] {}", Local::now().format("%Y-%m-%d %H:%M:%S"), msg);
 }
 
-/// Check if the given interface can reach the peer via ping
-fn ping_interface(iface: &str, peer_ip: &str, count: u8, timeout: u8) -> bool {
-    debug!("Pinging {} from interface {}", peer_ip, iface);
+/// Retrieve the default gateway for a specific interface
+fn get_gateway_for_interface(iface: &str) -> Option<String> {
+    // Run: ip route show dev <iface>
+    let output = Command::new("ip")
+        .args(["route", "show", "dev", iface])
+        .output()
+        .ok()?;
 
-    Command::new("ping")
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    
+    // Look for lines like "default via 192.168.1.1 ..."
+    for line in stdout.lines() {
+        let parts: Vec<&str> = line.split_whitespace().collect();
+        if parts.len() >= 3 && parts[0] == "default" && parts[1] == "via" {
+            return Some(parts[2].to_string());
+        }
+    }
+    
+    // If no default route specifically for this dev, try main table generic check? 
+    // Usually "ip route show dev X" is sufficient for connected interfaces with gateways.
+    // If it's a P2P link, gateway might not be needed.
+    None
+}
+
+/// Execute ping and return stats (success, avg_latency_ms)
+fn measure_latency(iface: &str, target: &str, count: u8, timeout: u8) -> (bool, f64) {
+    let output = Command::new("ping")
         .args([
             "-I", iface,
             "-c", &count.to_string(),
             "-W", &timeout.to_string(),
-            peer_ip,
+            target,
         ])
-        .output()
-        .map(|o| o.status.success())
-        .unwrap_or(false)
-}
-
-/// Bring interface up using nmcli
-fn bring_interface_up(iface: &str) -> Result<()> {
-    log_with_timestamp(&format!("🔺 Bringing interface {} up", iface));
-    
-    Command::new("nmcli")
-        .args(["device", "connect", iface])
-        .output()
-        .context(format!("Failed to bring interface {} up", iface))?;
-    
-    // Wait a moment for interface to stabilize
-    thread::sleep(time::Duration::from_secs(2));
-    Ok(())
-}
-
-/// Bring interface down using nmcli
-fn bring_interface_down(iface: &str) -> Result<()> {
-    log_with_timestamp(&format!("🔻 Bringing interface {} down", iface));
-    
-    Command::new("nmcli")
-        .args(["device", "disconnect", iface])
-        .output()
-        .context(format!("Failed to bring interface {} down", iface))?;
-    
-    // Wait a moment for interface to fully disconnect
-    thread::sleep(time::Duration::from_secs(2));
-    Ok(())
-}
-
-/// Restart WireGuard interface using nmcli
-fn restart_wireguard_interface(wg_interface: &str) -> Result<()> {
-    log_with_timestamp(&format!("🔄 Restarting WireGuard interface {}", wg_interface));
-    
-    // First bring down
-    Command::new("nmcli")
-        .args(["connection", "down", wg_interface])
-        .output()
-        .context(format!("Failed to bring down WireGuard interface {}", wg_interface))?;
-    
-    // Wait for cleanup
-    thread::sleep(time::Duration::from_secs(1));
-    
-    // Then bring up
-    Command::new("nmcli")
-        .args(["connection", "up", wg_interface])
-        .output()
-        .context(format!("Failed to bring up WireGuard interface {}", wg_interface))?;
-    
-    // Wait for WireGuard to establish connection
-    thread::sleep(time::Duration::from_secs(3));
-    Ok(())
-}
-
-/// Check if interface is up using nmcli
-fn is_interface_up(iface: &str) -> bool {
-    let output = Command::new("nmcli")
-        .args(["device", "status"])
         .output();
-    
+
     match output {
-        Ok(o) => {
-            let status = String::from_utf8_lossy(&o.stdout);
-            for line in status.lines() {
-                if line.contains(iface) && line.contains("connected") {
-                    return true;
+        Ok(out) if out.status.success() => {
+            let stdout = String::from_utf8_lossy(&out.stdout);
+            // Parse rtt min/avg/max/mdev = 1.1/2.2/3.3/0.4 ms
+            for line in stdout.lines() {
+                if line.contains("min/avg/max") {
+                    if let Some(stats) = line.split('=').nth(1) {
+                        let parts: Vec<&str> = stats.split('/').collect();
+                        if parts.len() >= 2 {
+                            if let Ok(avg) = parts[1].trim().parse::<f64>() {
+                                return (true, avg);
+                            }
+                        }
+                    }
                 }
             }
-            false
-        },
-        Err(_) => false
+            (true, 0.0) // Success but failed to parse latency?
+        }
+        _ => (false, 0.0),
     }
 }
 
-/// Perform speed test by measuring ping latency and estimating throughput
-fn perform_speed_test(iface: &str, peer_ip: &str, speed_test_count: u8, speed_test_timeout: u8) -> Option<SpeedTestResult> {
-    info!("Performing speed test on interface: {} to peer: {}", iface, peer_ip);
+/// Update the route to the peer IP through the specified interface
+fn update_route(peer_ip: &str, iface: &str, gateway: Option<&String>) -> Result<()> {
+    // Command: ip route replace <peer_ip> [via <gateway>] dev <iface>
+    let mut cmd = Command::new("ip");
+    cmd.arg("route").arg("replace").arg(peer_ip);
+    
+    if let Some(gw) = gateway {
+        cmd.arg("via").arg(gw);
+    }
+    
+    cmd.arg("dev").arg(iface);
+    
+    // We can set a metric if we want, but since we are "replacing", 
+    // we effectively choose this interface as the active one for this destination.
+    // To be cleaner, we can set metric 100.
+    cmd.arg("metric").arg("100");
 
-    let ping_command = Command::new("ping")
-        .args(["-I", iface, "-c", &speed_test_count.to_string(), "-W", &speed_test_timeout.to_string(), peer_ip])
-        .output();
-
-    let output = match ping_command {
-        Ok(output) => output,
-        Err(e) => {
-            warn!("Failed to execute ping command for {}: {}", iface, e);
-            return None;
-        }
-    };
-
+    let output = cmd.output().context("Failed to execute ip route command")?;
+    
     if !output.status.success() {
-        warn!("Ping command failed for {} with status: {}", iface, output.status);
-        return None;
-    }
-
-    let output_str = String::from_utf8_lossy(&output.stdout);
-
-    // Extract latency from ping output
-    let mut latency = 0.0;
-    for line in output_str.lines() {
-        if line.contains("avg") {
-            let parts: Vec<&str> = line.split('/').collect();
-            if parts.len() >= 5 {
-                latency = parts[4].parse::<f64>().unwrap_or(0.0);
-                break;
-            }
-        }
-    }
-
-    // Calculate packet success rate
-    let success_count = output_str.matches("time=").count();
-    let success_rate = success_count as f64 / speed_test_count as f64;
-
-    // Estimate speed based on latency and success rate
-    let download_speed = if success_rate > 0.8 {
-        if latency < 20.0 { 200.0 }
-        else if latency < 50.0 { 100.0 }
-        else if latency < 100.0 { 50.0 }
-        else { 20.0 }
-    } else if success_rate > 0.5 {
-        if latency < 100.0 { 30.0 }
-        else { 10.0 }
-    } else {
-        5.0
-    };
-
-    info!("Speed test results for {}: {:.2} Mbps down",
-           iface, download_speed);
-
-    Some(SpeedTestResult {
-        interface: iface.to_string(),
-        download_speed,
-    })
-}
-
-/// Compare speed test results and determine if we should switch interfaces
-fn should_switch_to_faster_interface(
-    primary_result: &SpeedTestResult,
-    secondary_result: &SpeedTestResult,
-    speed_threshold: u8,
-) -> Option<String> {
-    let primary_speed = primary_result.download_speed;
-    let secondary_speed = secondary_result.download_speed;
-
-    info!("Speed comparison - Primary: {:.2} Mbps, Secondary: {:.2} Mbps",
-          primary_speed, secondary_speed);
-
-    // If secondary is significantly faster
-    if secondary_speed > 0.0 && primary_speed > 0.0 {
-        let speed_improvement = ((secondary_speed - primary_speed) / primary_speed) * 100.0;
-        if speed_improvement >= speed_threshold as f64 {
-            info!("Secondary interface is {:.1}% faster than primary (threshold: {}%)",
-                  speed_improvement, speed_threshold);
-            return Some(secondary_result.interface.clone());
-        }
-    }
-
-    // If primary is faster or speeds are comparable, stick with primary
-    None
-}
-
-/// Main failover logic using interface up/down approach
-fn perform_failover_check(context: &FailoverContext) -> Result<()> {
-    log_with_timestamp("🔄 Performing failover check");
-    
-    // Check current interface states
-    let primary_up = is_interface_up(&context.primary);
-    let secondary_up = is_interface_up(&context.secondary);
-    
-    info!("Interface states - {}: {}, {}: {}", 
-          context.primary, if primary_up { "UP" } else { "DOWN" },
-          context.secondary, if secondary_up { "UP" } else { "DOWN" });
-    
-    // Test connectivity for currently up interfaces
-    let primary_connectivity = if primary_up { 
-        ping_interface(&context.primary, &context.peer_ip, context.count, context.timeout) 
-    } else { 
-        false 
-    };
-    
-    let secondary_connectivity = if secondary_up { 
-        ping_interface(&context.secondary, &context.peer_ip, context.count, context.timeout) 
-    } else { 
-        false 
-    };
-    
-    info!("Connectivity - {}: {}, {}: {}", 
-          context.primary, if primary_connectivity { "OK" } else { "FAIL" },
-          context.secondary, if secondary_connectivity { "OK" } else { "FAIL" });
-    
-    // Handle connectivity failures
-    if !primary_connectivity && primary_up {
-        log_with_timestamp(&format!("❌ Primary interface {} lost connectivity", context.primary));
-        bring_interface_down(&context.primary)?;
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        return Err(anyhow::anyhow!("ip route failed: {}", stderr));
     }
     
-    if !secondary_connectivity && secondary_up {
-        log_with_timestamp(&format!("❌ Secondary interface {} lost connectivity", context.secondary));
-        bring_interface_down(&context.secondary)?;
-    }
-    
-    // Handle interface recovery
-    if !primary_up && !primary_connectivity {
-        // Try to bring up primary if it's down and we don't know its connectivity
-        log_with_timestamp(&format!("🔄 Attempting to recover interface {}", context.primary));
-        if let Ok(()) = bring_interface_up(&context.primary) {
-            thread::sleep(time::Duration::from_secs(3));
-            let connectivity = ping_interface(&context.primary, &context.peer_ip, context.count, context.timeout);
-            if !connectivity {
-                bring_interface_down(&context.primary)?;
-            }
-        }
-    }
-    
-    if !secondary_up && !secondary_connectivity {
-        // Try to bring up secondary if it's down and we don't know its connectivity
-        log_with_timestamp(&format!("🔄 Attempting to recover interface {}", context.secondary));
-        if let Ok(()) = bring_interface_up(&context.secondary) {
-            thread::sleep(time::Duration::from_secs(3));
-            let connectivity = ping_interface(&context.secondary, &context.peer_ip, context.count, context.timeout);
-            if !connectivity {
-                bring_interface_down(&context.secondary)?;
-            }
-        }
-    }
-    
-    // Determine which interfaces are currently working
-    let current_primary_up = is_interface_up(&context.primary);
-    let current_secondary_up = is_interface_up(&context.secondary);
-    
-    let primary_working = current_primary_up && ping_interface(&context.primary, &context.peer_ip, context.count, context.timeout);
-    let secondary_working = current_secondary_up && ping_interface(&context.secondary, &context.peer_ip, context.count, context.timeout);
-    
-    // Speed optimization logic
-    if primary_working && secondary_working {
-        log_with_timestamp("⚡ Both interfaces working - performing speed optimization");
-        
-        let primary_speed = perform_speed_test(&context.primary, &context.peer_ip, context.speed_test_count, context.speed_test_timeout);
-        let secondary_speed = perform_speed_test(&context.secondary, &context.peer_ip, context.speed_test_count, context.speed_test_timeout);
-        
-        if let (Some(primary_result), Some(secondary_result)) = (primary_speed, secondary_speed) {
-            if let Some(faster_interface) = should_switch_to_faster_interface(
-                &primary_result, 
-                &secondary_result, 
-                context.speed_threshold
-            ) {
-                if faster_interface == context.secondary {
-                    log_with_timestamp(&format!("🚀 Switching to faster interface: {}", context.secondary));
-                    bring_interface_down(&context.primary)?;
-                } else {
-                    log_with_timestamp(&format!("🚀 Keeping primary interface: {}", context.primary));
-                    bring_interface_down(&context.secondary)?;
-                }
-                
-                // Restart WireGuard to pick up the new interface
-                restart_wireguard_interface(&context.wg_interface)?;
-            }
-        }
-    } else if !primary_working && secondary_working {
-        // Only secondary is working
-        log_with_timestamp(&format!("🔄 Switching to secondary interface: {}", context.secondary));
-        if current_primary_up {
-            bring_interface_down(&context.primary)?;
-        }
-        bring_interface_up(&context.secondary)?;
-        restart_wireguard_interface(&context.wg_interface)?;
-    } else if primary_working && !secondary_working {
-        // Only primary is working
-        log_with_timestamp(&format!("✅ Primary interface working: {}", context.primary));
-        if current_secondary_up {
-            bring_interface_down(&context.secondary)?;
-        }
-        // Ensure primary is up
-        if !current_primary_up {
-            bring_interface_up(&context.primary)?;
-            restart_wireguard_interface(&context.wg_interface)?;
-        }
-    } else {
-        // No interfaces working
-        log_with_timestamp("❌ No working interfaces found");
-        // Try to recover primary interface
-        log_with_timestamp(&format!("🔄 Attempting emergency recovery of {}", context.primary));
-        if let Ok(()) = bring_interface_up(&context.primary) {
-            thread::sleep(time::Duration::from_secs(5));
-            restart_wireguard_interface(&context.wg_interface)?;
-        }
-    }
-    
-    Ok(())
-}
-
-/// Initialize interfaces at startup
-fn initialize_interfaces(context: &FailoverContext) -> Result<()> {
-    log_with_timestamp("🚀 Initializing interfaces for failover");
-    
-    // Ensure WireGuard is up
-    if !is_interface_up(&context.wg_interface) {
-        log_with_timestamp(&format!("🔺 Bringing up WireGuard interface {}", context.wg_interface));
-        Command::new("nmcli")
-            .args(["connection", "up", &context.wg_interface])
-            .output()
-            .context("Failed to bring up WireGuard interface")?;
-        thread::sleep(time::Duration::from_secs(3));
-    }
-    
-    // Test primary interface first
-    log_with_timestamp(&format!("🔍 Testing primary interface {}", context.primary));
-    let primary_connectivity = ping_interface(&context.primary, &context.peer_ip, context.count, context.timeout);
-    
-    if primary_connectivity {
-        log_with_timestamp(&format!("✅ Primary interface {} is working", context.primary));
-        // Ensure primary is up and secondary is down
-        if !is_interface_up(&context.primary) {
-            bring_interface_up(&context.primary)?;
-        }
-        if is_interface_up(&context.secondary) {
-            bring_interface_down(&context.secondary)?;
-        }
-    } else {
-        log_with_timestamp(&format!("❌ Primary interface {} failed, testing secondary", context.primary));
-        // Test secondary interface
-        let secondary_connectivity = ping_interface(&context.secondary, &context.peer_ip, context.count, context.timeout);
-        
-        if secondary_connectivity {
-            log_with_timestamp(&format!("✅ Secondary interface {} is working", context.secondary));
-            // Bring up secondary and down primary
-            bring_interface_up(&context.secondary)?;
-            if is_interface_up(&context.primary) {
-                bring_interface_down(&context.primary)?;
-            }
-            restart_wireguard_interface(&context.wg_interface)?;
-        } else {
-            log_with_timestamp("❌ No working interfaces found at startup");
-            // Emergency: try to bring up primary anyway
-            bring_interface_up(&context.primary)?;
-            restart_wireguard_interface(&context.wg_interface)?;
-        }
-    }
-    
+    debug!("Updated route for {} via {} (gw: {:?})", peer_ip, iface, gateway);
     Ok(())
 }
 
 fn main() -> Result<()> {
     env_logger::init();
     
+    // 1. Load Configuration
     let args = Args::parse();
     
-    // Load configuration
-    let config_path = args.config
-        .or_else(|| Some(PathBuf::from("/etc/wg-failover/config.toml")))
-        .unwrap();
-    
-    let config_content = std::fs::read_to_string(&config_path)
-        .context(format!("Failed to read config file: {:?}", config_path))?;
-    
-    let config: Config = toml::from_str(&config_content)
-        .context("Failed to parse config file")?;
-    
-    // Use command line args or config values
-    let peer_ip = args.peer_ip.unwrap_or(config.peer_config.ip);
-    let wg_interface = args.wg_interface.unwrap_or(config.wireguard_config.interface);
-    let primary = args.primary.unwrap_or(config.interface_config.primary);
-    let secondary = args.secondary.unwrap_or(config.interface_config.secondary);
-    
-    // Use command line args or config values for monitoring parameters
-    let interval = args.interval.or(config.monitoring_config.interval).unwrap_or(30);
-    let count = args.count.unwrap_or(3);
-    let timeout = args.timeout.unwrap_or(2);
-    let speedtest_interval = args.speedtest_interval.or(config.monitoring_config.speedtest_interval).unwrap_or(300);
-    let speed_threshold = args.speed_threshold.or(config.monitoring_config.speed_threshold).unwrap_or(20);
-    let speed_test_count = args.speed_test_count.or(config.monitoring_config.speed_test_count).unwrap_or(5);
-    let speed_test_timeout = args.speed_test_timeout.or(config.monitoring_config.speed_test_timeout).unwrap_or(5);
-    
-    info!("WireGuard Failover starting...");
-    info!("Peer IP: {}", peer_ip);
-    info!("WireGuard Interface: {}", wg_interface);
-    info!("Primary Interface: {}", primary);
-    info!("Secondary Interface: {}", secondary);
-    info!("Check Interval: {}s", interval);
-    info!("Speed Test Interval: {}s", speedtest_interval);
-    
-    // Create failover context
-    let context = FailoverContext {
-        wg_interface: wg_interface.clone(),
-        primary: primary.clone(),
-        secondary: secondary.clone(),
-        peer_ip: peer_ip.clone(),
-        count,
-        timeout,
-        speed_threshold,
-        speed_test_count,
-        speed_test_timeout,
+    let config_path = args.config.clone()
+        .unwrap_or_else(|| PathBuf::from("/etc/wg-failover/config.toml"));
+        
+    let config_file: Option<Config> = if config_path.exists() {
+        let content = std::fs::read_to_string(&config_path)
+            .context(format!("Failed to read config file {:?}", config_path))?;
+        Some(toml::from_str(&content).context("Failed to parse TOML")?)
+    } else {
+        None
     };
-    
-    // Initialize interfaces
-    initialize_interfaces(&context)?;
-    
-    let mut last_speed_test = std::time::Instant::now();
 
+    // Helper to extract config values with precedence: Args -> Config File -> Defaults
+    let peer_ip = args.peer_ip.clone()
+        .or_else(|| config_file.as_ref().and_then(|c| c.peer.as_ref()).and_then(|p| p.ip.clone()))
+        .context("Peer IP is required (in args or config)")?;
+
+    let primary_iface = args.primary.clone()
+        .or_else(|| config_file.as_ref().and_then(|c| c.interfaces.as_ref()).and_then(|i| i.primary.clone()))
+        .context("Primary interface is required")?;
+
+    let secondary_iface = args.secondary.clone()
+        .or_else(|| config_file.as_ref().and_then(|c| c.interfaces.as_ref()).and_then(|i| i.secondary.clone()))
+        .context("Secondary interface is required")?;
+        
+    let interval_secs = args.interval
+        .or_else(|| config_file.as_ref().and_then(|c| c.monitoring.as_ref()).and_then(|m| m.interval))
+        .unwrap_or(30);
+
+    let speed_interval_secs = args.speedtest_interval
+        .or_else(|| config_file.as_ref().and_then(|c| c.monitoring.as_ref()).and_then(|m| m.speedtest_interval))
+        .unwrap_or(300);
+        
+    let speed_threshold = args.speed_threshold
+        .or_else(|| config_file.as_ref().and_then(|c| c.monitoring.as_ref()).and_then(|m| m.speed_threshold))
+        .unwrap_or(20);
+
+    let state = AppState {
+        peer_ip,
+        primary_iface,
+        secondary_iface,
+        check_interval: Duration::from_secs(interval_secs),
+        speed_check_interval: Duration::from_secs(speed_interval_secs),
+        speed_threshold,
+    };
+
+    log_with_timestamp(&format!("Starting WireGuard Failover (Simple Metric Mode)"));
+    info!("Peer: {}", state.peer_ip);
+    info!("Primary: {}, Secondary: {}", state.primary_iface, state.secondary_iface);
+    info!("Intervals - Check: {:?}, Speed: {:?}", state.check_interval, state.speed_check_interval);
+
+    let mut primary_metrics = InterfaceMetrics::default();
+    let mut secondary_metrics = InterfaceMetrics::default();
     
-    // Main monitoring loop
+    // Force check on start if possible, otherwise start timer now
+    let mut last_speed_check = Instant::now()
+        .checked_sub(state.speed_check_interval)
+        .unwrap_or(Instant::now());
+    
+    let mut current_active_interface: Option<String> = None;
+
     loop {
-        let now = std::time::Instant::now();
+        let now = Instant::now();
         
-        // Check if we should perform speed test
-        let should_speed_test = now.duration_since(last_speed_test).as_secs() >= speedtest_interval;
+        // ----------------------------------------
+        // 1. Identify Gateways (Dynamic, in case of network changes)
+        // ----------------------------------------
+        let primary_gw = get_gateway_for_interface(&state.primary_iface);
+        let secondary_gw = get_gateway_for_interface(&state.secondary_iface);
+
+        // ----------------------------------------
+        // 2. Connectivity Check (Frequent)
+        // ----------------------------------------
+        // We ping the Peer IP through specific interfaces to test reachability.
+        // NOTE: If the interface doesn't have a route to peer, ping -I usually works if gateway is on-link or default exists.
         
-        // Create context for this check (adjust speed test parameters if needed)
-        let mut check_context = context.clone();
-        if !should_speed_test {
-            check_context.speed_test_count = 1;
-            check_context.speed_test_timeout = timeout;
+        let (p_ok, p_lat) = measure_latency(&state.primary_iface, &state.peer_ip, 1, 2);
+        let (s_ok, s_lat) = measure_latency(&state.secondary_iface, &state.peer_ip, 1, 2);
+
+        primary_metrics.status = if p_ok { InterfaceStatus::Working } else { InterfaceStatus::Failed };
+        primary_metrics.connectivity_latency_ms = p_lat;
+        
+        secondary_metrics.status = if s_ok { InterfaceStatus::Working } else { InterfaceStatus::Failed };
+        secondary_metrics.connectivity_latency_ms = s_lat;
+
+        // ----------------------------------------
+        // 3. Speed Check (Periodic)
+        // ----------------------------------------
+        // Only if both are working, we might want to run a heavier test to decide best path.
+        if now.duration_since(last_speed_check) >= state.speed_check_interval {
+            log_with_timestamp("Performing speed/quality check...");
+            if primary_metrics.status == InterfaceStatus::Working && secondary_metrics.status == InterfaceStatus::Working {
+                // Run heavier ping
+                let (_, p_avg) = measure_latency(&state.primary_iface, &state.peer_ip, 5, 5);
+                let (_, s_avg) = measure_latency(&state.secondary_iface, &state.peer_ip, 5, 5);
+                
+                primary_metrics.speed_latency_ms = p_avg;
+                secondary_metrics.speed_latency_ms = s_avg;
+                
+                info!("Speed/Latency Result - {}: {:.1}ms, {}: {:.1}ms", 
+                     state.primary_iface, p_avg, state.secondary_iface, s_avg);
+            }
+            last_speed_check = now;
         }
-        
-        // Perform failover check
-        if let Err(e) = perform_failover_check(&check_context) {
-            error!("Failover check failed: {}", e);
+
+        // ----------------------------------------
+        // 4. Decision Logic
+        // ----------------------------------------
+        let target_interface = match (&primary_metrics.status, &secondary_metrics.status) {
+            (InterfaceStatus::Working, InterfaceStatus::Failed) => {
+                // Primary works, secondary fails -> Primary
+                Some((&state.primary_iface, &primary_gw))
+            },
+            (InterfaceStatus::Failed, InterfaceStatus::Working) => {
+                // Primary fails, secondary works -> Secondary
+                Some((&state.secondary_iface, &secondary_gw))
+            },
+            (InterfaceStatus::Working, InterfaceStatus::Working) => {
+                // Both work. Check preference and speed.
+                // Default is primary.
+                // If secondary is significantly faster (lower latency), switch.
+                // Note: "Faster" here uses latency as proxy. Lower is better.
+                
+                let p_lat = primary_metrics.speed_latency_ms;
+                let s_lat = secondary_metrics.speed_latency_ms;
+                
+                // If we are currently on Primary, only switch if Secondary is MUCH better (lower latency)
+                // Threshold is percentage.
+                // If Secondary is < Primary * (1 - threshold/100)
+                let threshold_factor = 1.0 - (state.speed_threshold as f64 / 100.0);
+                
+                if s_lat > 0.0 && p_lat > 0.0 && s_lat < (p_lat * threshold_factor) {
+                    info!("Secondary {} ({:.1}ms) is significantly faster than Primary {} ({:.1}ms). Switching.", 
+                          state.secondary_iface, s_lat, state.primary_iface, p_lat);
+                    Some((&state.secondary_iface, &secondary_gw))
+                } else {
+                    // Stick with Primary usually
+                    Some((&state.primary_iface, &primary_gw))
+                }
+            },
+            (InterfaceStatus::Failed, InterfaceStatus::Failed) => {
+                warn!("Both interfaces failed connectivity check.");
+                // Keep existing or do nothing?
+                // If we do nothing, we stay on the last set route.
+                None
+            },
+            _ => None
+        };
+
+        // ----------------------------------------
+        // 5. Apply Route Change
+        // ----------------------------------------
+        if let Some((target_iface, target_gw)) = target_interface {
+            let should_update = match &current_active_interface {
+                Some(current) => current != target_iface, // Changed interface
+                None => true, // First run
+            };
+
+            // Force update if it's been a while? Or just on change.
+            // Also need to handle if gateway changed.
+            // For simplicity, we update if interface changed OR if we just want to ensure consistency.
+            // Let's only update on change to avoid log spam, but maybe retry if previous attempt failed?
+            
+            if should_update {
+                log_with_timestamp(&format!("Routing WireGuard Peer {} via {}", state.peer_ip, target_iface));
+                match update_route(&state.peer_ip, target_iface, target_gw.as_ref()) {
+                    Ok(_) => {
+                        current_active_interface = Some(target_iface.clone());
+                        log_with_timestamp("Route updated successfully.");
+                    },
+                    Err(e) => {
+                        error!("Failed to update route: {}", e);
+                    }
+                }
+            }
         }
-        
-        // Update timers
-        if should_speed_test {
-            last_speed_test = now;
-        }
-        
-        // Sleep until next check
-        thread::sleep(time::Duration::from_secs(interval));
+
+        // Sleep
+        thread::sleep(state.check_interval);
     }
 }
