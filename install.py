@@ -248,6 +248,68 @@ def enable_service() -> bool:
         print_color(f"Warning: Could not enable service: {e}", YELLOW)
         return False
 
+def disable_service() -> bool:
+    """Disable wg-failover service from starting on boot"""
+    print_color("Disabling wg-failover service from starting on boot...", YELLOW)
+    try:
+        subprocess.run(['systemctl', 'disable', 'wg-failover.service'], check=True)
+        print_color("Service disabled successfully", GREEN)
+        return True
+    except subprocess.CalledProcessError as e:
+        print_color(f"Warning: Could not disable service: {e}", YELLOW)
+        return False
+
+def cleanup_installation() -> bool:
+    """Stop service, disable it, and remove binary and service file (preserve config and logs)"""
+    print_color("=== Cleaning up WireGuard Failover installation ===", BLUE)
+    
+    # Stop the service if running
+    was_running = stop_service()
+    
+    # Disable the service
+    _ = disable_service()
+    
+    # Remove service file
+    removed_items = []
+    try:
+        if os.path.exists(SERVICE_PATH):
+            os.remove(SERVICE_PATH)
+            removed_items.append("service file")
+            print_color(f"✓ Removed service file: {SERVICE_PATH}", GREEN)
+    except Exception as e:
+        print_color(f"Warning: Could not remove service file: {e}", YELLOW)
+    
+    # Remove binary
+    try:
+        if os.path.exists(BINARY_PATH):
+            os.remove(BINARY_PATH)
+            removed_items.append("binary")
+            print_color(f"✓ Removed binary: {BINARY_PATH}", GREEN)
+    except Exception as e:
+        print_color(f"Warning: Could not remove binary: {e}", YELLOW)
+    
+    # Note: Config directory and log file are preserved for future installations
+    if os.path.exists(CONFIG_PATH):
+        print_color(f"✓ Config file preserved: {CONFIG_PATH}", GREEN)
+    if os.path.exists(LOG_PATH):
+        print_color(f"✓ Log file preserved: {LOG_PATH}", GREEN)
+    
+    # Reload systemd daemon if service file was removed
+    if "service file" in removed_items:
+        try:
+            subprocess.run(['systemctl', 'daemon-reload'], check=True)
+            print_color("✓ Systemd daemon reloaded", GREEN)
+        except Exception as e:
+            print_color(f"Warning: Could not reload systemd daemon: {e}", YELLOW)
+    
+    if removed_items:
+        print_color(f"✓ Cleanup complete. Removed: {', '.join(removed_items)}", GREEN)
+        print_color("✓ Config and log files preserved for future use", GREEN)
+    else:
+        print_color("No installation found to clean up", YELLOW)
+    
+    return len(removed_items) > 0
+
 def local_install(current_dir: str, is_update: bool) -> None:
     """Perform local installation or update"""
     if is_update:
@@ -282,6 +344,9 @@ def local_install(current_dir: str, is_update: bool) -> None:
     if missing_commands:
         print_color(f"Warning: Missing commands: {', '.join(missing_commands)}", YELLOW)
         print_color("Some features may not work properly", YELLOW)
+    
+    # Clean up any existing installation
+    cleanup_installation()
     
     # Install binary
     binary_src = os.path.join(current_dir, 'target', 'release', 'wg-failover')
@@ -494,6 +559,22 @@ if systemctl is-active wg-failover.service >/dev/null 2>&1; then
 else
     SERVICE_WAS_RUNNING=false
 fi
+
+# Disable service before cleanup
+echo "Disabling wg-failover service..."
+systemctl disable wg-failover.service 2>/dev/null || true
+
+# Remove existing binary if it exists
+echo "Removing existing binary..."
+rm -f "$BINARY_DEST" 2>/dev/null || true
+
+# Remove existing service file if it exists  
+echo "Removing existing service file..."
+rm -f "$SERVICE_DEST" 2>/dev/null || true
+
+# Reload systemd daemon after removing service file
+echo "Reloading systemd daemon..."
+systemctl daemon-reload 2>/dev/null || true
 
 # Backup existing config if updating
 if [ -f "$CONFIG_DEST" ] && [ "$IS_UPDATE" = "true" ]; then
