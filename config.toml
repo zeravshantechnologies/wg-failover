@@ -49,7 +49,7 @@ primary = "enp0s31f6"
 # This interface will be used when the primary interface loses connectivity.
 # Example: secondary = "wlan0" (WiFi)
 # Example: secondary = "wwp0s20u4i6" (cellular modem)
-secondary = "wlp0s20f3"
+secondary = "enp0s20f0u1"
 
 # Monitoring Configuration
 # ------------------------

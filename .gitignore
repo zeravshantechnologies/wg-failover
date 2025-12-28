@@ -3,6 +3,7 @@
 
 # Cargo lock file
 Cargo.lock
+__pycache__/
 
 # Backup files
 **/*.rs.bk

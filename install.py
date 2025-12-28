@@ -1,182 +1,250 @@
 #!/usr/bin/env python3
+"""
+WireGuard Failover Installer
+============================
+This script installs or updates the WireGuard Failover service locally or remotely.
+For remote installation, it copies only necessary assets (binary, config, service file)
+and executes remote commands via SSH without copying the install script itself.
+"""
 
-import os
-import sys
-import subprocess
 import argparse
 import getpass
+import os
 import shutil
+import subprocess
+import sys
 import tempfile
 from pathlib import Path
 
+# Color codes for terminal output
+BLUE = '\033[94m'
+GREEN = '\033[92m'
+YELLOW = '\033[93m'
+RED = '\033[91m'
+ENDC = '\033[0m'
 
-# Terminal colors
-RED = '\033[0;31m'
-GREEN = '\033[0;32m'
-YELLOW = '\033[0;33m'
-BLUE = '\033[0;34m'
-NC = '\033[0m'  # No Color
-
-# Default paths
+# Installation paths
 BINARY_PATH = "/usr/local/bin/wg-failover"
-SERVICE_PATH = "/etc/systemd/system/wg-failover.service"
 CONFIG_DIR = "/etc/wg-failover"
 CONFIG_PATH = f"{CONFIG_DIR}/config.toml"
+SERVICE_PATH = "/etc/systemd/system/wg-failover.service"
 LOG_PATH = "/var/log/wg-failover.log"
 
-def print_color(message: str, color: str = NC) -> None:
-    """Print colored output"""
-    print(f"{color}{message}{NC}")
+def print_color(text: str, color: str) -> None:
+    """Print colored text to terminal"""
+    print(f"{color}{text}{ENDC}")
 
-def replace_config_with_latest(new_config_path: str, existing_config_path: str) -> None:
-    """Replace existing config file with latest version"""
-    backup_path: str | None = None
-    try:
-        # Create backup of existing config
-        backup_path = f"{existing_config_path}.backup"
-        if os.path.exists(existing_config_path):
-            _ = shutil.copy2(existing_config_path, backup_path)
-            print_color(f"Backing up current config to: {backup_path}", YELLOW)
-        
-        # Replace with new config
-        _ = shutil.copy2(new_config_path, existing_config_path)
-        os.chmod(existing_config_path, 0o644)
-        print_color("Configuration replaced with latest version", GREEN)
-        
-    except Exception as e:
-        print_color(f"Error replacing configuration: {e}", RED)
-        # Try to restore from backup if replacement failed
-        if backup_path and os.path.exists(backup_path):
-            _ = shutil.copy2(backup_path, existing_config_path)
-            print_color("Restored configuration from backup", YELLOW)
+def replace_config_with_latest(source_config: str, dest_config: str) -> None:
+    """Replace configuration file with latest version, preserving user settings"""
+    if not os.path.exists(dest_config):
+        # If destination doesn't exist, just copy
+        shutil.copy(source_config, dest_config)
+        return
+    
+    # Read existing config
+    with open(dest_config, 'r') as f:
+        existing_lines = f.readlines()
+    
+    # Read new config
+    with open(source_config, 'r') as f:
+        new_lines = f.readlines()
+    
+    # Extract sections from existing config
+    existing_sections = {}
+    current_section = None
+    section_content = []
+    
+    for line in existing_lines:
+        line_stripped = line.strip()
+        if line_stripped.startswith('[') and line_stripped.endswith(']'):
+            if current_section is not None:
+                existing_sections[current_section] = section_content
+            current_section = line_stripped
+            section_content = [line]
+        elif current_section is not None:
+            section_content.append(line)
+    
+    if current_section is not None:
+        existing_sections[current_section] = section_content
+    
+    # Build new config with preserved sections
+    output_lines = []
+    current_section = None
+    section_content = []
+    
+    for line in new_lines:
+        line_stripped = line.strip()
+        if line_stripped.startswith('[') and line_stripped.endswith(']'):
+            if current_section is not None:
+                # Write preserved section content if exists, otherwise new content
+                if current_section in existing_sections:
+                    output_lines.extend(existing_sections[current_section])
+                else:
+                    output_lines.extend(section_content)
+            
+            current_section = line_stripped
+            section_content = [line]
+        elif current_section is not None:
+            section_content.append(line)
+    
+    # Handle last section
+    if current_section is not None:
+        if current_section in existing_sections:
+            output_lines.extend(existing_sections[current_section])
+        else:
+            output_lines.extend(section_content)
+    
+    # Write updated config
+    with open(dest_config, 'w') as f:
+        f.writelines(output_lines)
 
-def check_root():
+def check_root() -> None:
     """Check if running as root"""
     if os.geteuid() != 0:
-        print_color("Error: This script must be run as root", RED)
+        print_color("Error: This script must be run as root for local installation", RED)
         sys.exit(1)
 
-def is_installed():
+def is_installed() -> bool:
     """Check if wg-failover is already installed"""
     return os.path.exists(BINARY_PATH) and os.path.exists(SERVICE_PATH)
 
-def is_service_running():
-    """Check if the wg-failover service is currently running"""
+def is_service_running() -> bool:
+    """Check if wg-failover service is running"""
     try:
         result = subprocess.run(['systemctl', 'is-active', 'wg-failover.service'], 
-                              capture_output=True, text=True)
+                               capture_output=True, text=True)
         return result.returncode == 0
-    except Exception:
+    except (subprocess.CalledProcessError, FileNotFoundError):
         return False
 
-def get_installed_version():
-    """Get version of installed wg-failover"""
-    if not is_installed():
+def get_installed_version() -> str | None:
+    """Get version of installed wg-failover binary"""
+    if not os.path.exists(BINARY_PATH):
         return None
     
     try:
-        result = subprocess.run([BINARY_PATH, "--version"], capture_output=True, text=True, check=True)
-        version_line = result.stdout.strip()
-        # Extract version number from output like "wg-failover 0.1.0"
-        if " " in version_line:
-            return version_line.split(" ")[1]
-        return version_line
+        result = subprocess.run([BINARY_PATH, '--version'], 
+                               capture_output=True, text=True)
+        if result.returncode == 0:
+            # Extract version from output like "wg-failover 0.1.0"
+            for line in result.stdout.splitlines():
+                if 'wg-failover' in line:
+                    parts = line.split()
+                    if len(parts) >= 2:
+                        return parts[1]
     except (subprocess.CalledProcessError, FileNotFoundError):
-        return None
-
-def get_current_version():
-    """Get version of current wg-failover binary"""
-    current_dir = os.path.dirname(os.path.realpath(__file__))
+        pass
     
-    # Check for binary in target/release first
-    binary_src = os.path.join(current_dir, 'target', 'release', 'wg-failover')
-    if not os.path.exists(binary_src):
-        # Fallback to current directory
-        binary_src = os.path.join(current_dir, 'wg-failover')
-    
-    if not os.path.exists(binary_src):
-        return None
-    
-    try:
-        result = subprocess.run([binary_src, "--version"], capture_output=True, text=True, check=True)
-        version_line = result.stdout.strip()
-        if " " in version_line:
-            return version_line.split(" ")[1]
-        return version_line
-    except (subprocess.CalledProcessError, FileNotFoundError):
-        return None
-
-def backup_config() -> str | None:
-    """Backup existing configuration"""
-    if os.path.exists(CONFIG_PATH) and os.path.getsize(CONFIG_PATH) > 0:
-        backup_path = f"{CONFIG_PATH}.backup"
-        print_color(f"Backing up existing configuration to {backup_path}...", YELLOW)
-        _ = shutil.copy2(CONFIG_PATH, backup_path)
-        print_color("Configuration backup created", GREEN)
-        return backup_path
     return None
 
-def restore_config() -> None:
+def get_current_version() -> str | None:
+    """Get version from current directory"""
+    # Try to get version from Cargo.toml
+    cargo_toml_path = os.path.join(os.path.dirname(os.path.realpath(__file__)), 'Cargo.toml')
+    if os.path.exists(cargo_toml_path):
+        try:
+            with open(cargo_toml_path, 'r') as f:
+                for line in f:
+                    if line.strip().startswith('version ='):
+                        # Extract version from: version = "0.1.0"
+                        version = line.split('=')[1].strip().strip('"\'')
+                        return version
+        except Exception:
+            pass
+    
+    # Try to get version from built binary
+    current_dir = os.path.dirname(os.path.realpath(__file__))
+    binary_path = os.path.join(current_dir, 'target', 'release', 'wg-failover')
+    if not os.path.exists(binary_path):
+        binary_path = os.path.join(current_dir, 'wg-failover')
+    
+    if os.path.exists(binary_path):
+        try:
+            result = subprocess.run([binary_path, '--version'], 
+                                   capture_output=True, text=True)
+            if result.returncode == 0:
+                for line in result.stdout.splitlines():
+                    if 'wg-failover' in line:
+                        parts = line.split()
+                        if len(parts) >= 2:
+                            return parts[1]
+        except (subprocess.CalledProcessError, FileNotFoundError):
+            pass
+    
+    return None
+
+def backup_config() -> bool:
+    """Backup existing configuration file"""
+    if os.path.exists(CONFIG_PATH):
+        backup_path = f"{CONFIG_PATH}.backup"
+        try:
+            shutil.copy(CONFIG_PATH, backup_path)
+            print_color(f"Configuration backed up to {backup_path}", GREEN)
+            return True
+        except Exception as e:
+            print_color(f"Warning: Could not backup configuration: {e}", YELLOW)
+            return False
+    return False
+
+def restore_config() -> bool:
     """Restore configuration from backup"""
     backup_path = f"{CONFIG_PATH}.backup"
     if os.path.exists(backup_path):
-        print_color("Restoring configuration from backup...", YELLOW)
-        _ = shutil.copy2(backup_path, CONFIG_PATH)
-        os.remove(backup_path)
-        print_color("Configuration restored", GREEN)
+        try:
+            shutil.copy(backup_path, CONFIG_PATH)
+            print_color(f"Configuration restored from {backup_path}", GREEN)
+            return True
+        except Exception as e:
+            print_color(f"Error: Could not restore configuration: {e}", RED)
+            return False
+    return False
 
 def stop_service() -> bool:
-    """Stop the wg-failover service"""
-    print_color("Stopping wg-failover service...", YELLOW)
-    try:
-        result = subprocess.run(['systemctl', 'stop', 'wg-failover.service'], capture_output=True, text=True)
-        if result.returncode == 0:
-            print_color("Service stopped", GREEN)
-            return True
-        else:
-            print_color(f"Service stop failed: {result.stderr}", YELLOW)
-            # Force kill any remaining processes
-            _ = subprocess.run(['pkill', '-f', 'wg-failover'], capture_output=True)
-            return False
-    except Exception as e:
-        print_color(f"Error stopping service: {e}", YELLOW)
-        return False
+    """Stop wg-failover service"""
+    was_running = is_service_running()
+    if was_running:
+        print_color("Stopping wg-failover service...", YELLOW)
+        try:
+            subprocess.run(['systemctl', 'stop', 'wg-failover.service'], check=True)
+            print_color("Service stopped successfully", GREEN)
+        except subprocess.CalledProcessError:
+            print_color("Warning: Could not stop service via systemctl", YELLOW)
+            # Try to kill the process directly
+            try:
+                subprocess.run(['pkill', '-f', 'wg-failover'], capture_output=True)
+                print_color("Process terminated", GREEN)
+            except Exception:
+                print_color("Warning: Could not terminate process", YELLOW)
+    return was_running
 
 def start_service() -> bool:
-    """Start the wg-failover service"""
-    print_color("Starting wg-failover service...", YELLOW)
+    """Start wg-failover service"""
+    print_color("Starting wg-failover service...", GREEN)
     try:
-        result = subprocess.run(['systemctl', 'start', 'wg-failover.service'], capture_output=True, text=True)
-        if result.returncode == 0:
-            print_color("Service started", GREEN)
-            # Wait a moment and verify it's actually running
-            import time
-            time.sleep(2)
-            if is_service_running():
-                print_color("Service verified as running", GREEN)
-                return True
-            else:
-                print_color("Warning: Service started but may not be running", YELLOW)
-                return False
+        subprocess.run(['systemctl', 'start', 'wg-failover.service'], check=True)
+        # Wait a moment for service to start
+        import time
+        time.sleep(2)
+        
+        # Verify service is running
+        if is_service_running():
+            print_color("Service started successfully", GREEN)
+            return True
         else:
-            print_color(f"Service start failed: {result.stderr}", RED)
+            print_color("Warning: Service may not have started properly", YELLOW)
             return False
-    except Exception as e:
+    except subprocess.CalledProcessError as e:
         print_color(f"Error starting service: {e}", RED)
         return False
 
 def enable_service() -> bool:
-    """Enable the wg-failover service to start on boot"""
-    print_color("Enabling wg-failover service...", YELLOW)
+    """Enable wg-failover service to start on boot"""
+    print_color("Enabling wg-failover service to start on boot...", GREEN)
     try:
-        result = subprocess.run(['systemctl', 'enable', 'wg-failover.service'], capture_output=True, text=True)
-        if result.returncode == 0:
-            print_color("Service enabled for automatic startup", GREEN)
-            return True
-        else:
-            print_color(f"Warning: Could not enable service: {result.stderr}", YELLOW)
-            return False
-    except Exception as e:
+        subprocess.run(['systemctl', 'enable', 'wg-failover.service'], check=True)
+        print_color("Service enabled successfully", GREEN)
+        return True
+    except subprocess.CalledProcessError as e:
         print_color(f"Warning: Could not enable service: {e}", YELLOW)
         return False
 
@@ -310,7 +378,7 @@ def local_install(current_dir: str, is_update: bool) -> None:
         print_color("Please edit the configuration file to match your setup!", YELLOW)
 
 def remote_install(target_ip: str, private_key: str, username: str, sudo_password: str, is_update: bool) -> None:
-    """Perform remote installation or update via SSH with sudo"""
+    """Perform remote installation or update via SSH without copying install script"""
     if is_update:
         print_color(f"=== Updating WireGuard Failover Remotely on {target_ip} ===", BLUE)
     else:
@@ -348,92 +416,247 @@ def remote_install(target_ip: str, private_key: str, username: str, sudo_passwor
         print_color(f"Error: wg-failover executable not found in {current_dir}/target/release/ or {current_dir}/", RED)
         sys.exit(1)
     
-    # Copy files to remote server
-    print_color("Copying files to remote server...", GREEN)
+    # Create temp directory on remote server
+    print_color("Creating temporary directory on remote server...", GREEN)
     remote_temp_dir = "/tmp/wg-failover-install"
     
-    # Create temp directory on remote server
-    _ = subprocess.run(ssh_cmd + ['mkdir', '-p', remote_temp_dir], check=True)
+    try:
+        _ = subprocess.run(ssh_cmd + ['mkdir', '-p', remote_temp_dir], check=True)
+    except subprocess.CalledProcessError:
+        print_color(f"Error: Could not create directory {remote_temp_dir} on remote server", RED)
+        sys.exit(1)
     
-    # Copy all required files to remote server
-    for file in required_files:
-        local_file = os.path.join(current_dir, file)
-        _ = subprocess.run(scp_cmd + [local_file, f"{username}@{target_ip}:{remote_temp_dir}/"], check=True)
+    # Copy files to remote server (only assets, not install script)
+    print_color("Copying assets to remote server...", GREEN)
     
     # Copy wg-failover executable
-    _ = subprocess.run(scp_cmd + [wg_failover_exe, f"{username}@{target_ip}:{remote_temp_dir}/"], check=True)
+    try:
+        _ = subprocess.run(scp_cmd + [wg_failover_exe, f"{username}@{target_ip}:{remote_temp_dir}/wg-failover"], check=True)
+        print_color("✓ Binary copied", GREEN)
+    except subprocess.CalledProcessError:
+        print_color("Error: Failed to copy binary to remote server", RED)
+        sys.exit(1)
     
-    # Copy install script
-    install_script = os.path.join(current_dir, 'install.py')
-    _ = subprocess.run(scp_cmd + [install_script, f"{username}@{target_ip}:{remote_temp_dir}/"], check=True)
+    # Copy service file
+    service_file = os.path.join(current_dir, 'wg-failover.service')
+    try:
+        _ = subprocess.run(scp_cmd + [service_file, f"{username}@{target_ip}:{remote_temp_dir}/wg-failover.service"], check=True)
+        print_color("✓ Service file copied", GREEN)
+    except subprocess.CalledProcessError:
+        print_color("Error: Failed to copy service file to remote server", RED)
+        sys.exit(1)
     
-    # Create installation script
-    install_mode = "--update" if is_update else "--local"
-    sudo_script_content = f'''#!/bin/bash
-# Run the installation/update
-echo "{sudo_password}" | sudo -S python3 {remote_temp_dir}/install.py {install_mode}
+    # Copy config file
+    config_file = os.path.join(current_dir, 'config.toml')
+    try:
+        _ = subprocess.run(scp_cmd + [config_file, f"{username}@{target_ip}:{remote_temp_dir}/config.toml"], check=True)
+        print_color("✓ Config file copied", GREEN)
+    except subprocess.CalledProcessError:
+        print_color("Error: Failed to copy config file to remote server", RED)
+        sys.exit(1)
+    
+    # Create remote installation script (executed on remote server)
+    # Note: We need to pass is_update as a parameter to the shell script
+    update_flag = "true" if is_update else "false"
+    install_script_content = f'''#!/bin/bash
+set -e
 
-# Force restart service to ensure new binary is running
-sudo systemctl stop wg-failover.service 2>/dev/null || true
-sudo pkill -f wg-failover 2>/dev/null || true
-sleep 2
-sudo systemctl start wg-failover.service 2>/dev/null || true
-sleep 3
+IS_UPDATE={update_flag}
 
-# Verify service is running
-if systemctl is-active wg-failover.service >/dev/null 2>&1; then
-    echo "✅ Service successfully restarted with new binary"
+if [ "$IS_UPDATE" = "true" ]; then
+    echo "Starting WireGuard Failover update..."
 else
-    echo "❌ Service restart failed - check logs"
-    # Try one more time with force restart
-    sudo systemctl restart wg-failover.service 2>/dev/null || true
+    echo "Starting WireGuard Failover installation..."
+fi
+
+# Check if running as root
+if [ "$EUID" -ne 0 ]; then
+    echo "Error: This script must be run as root"
+    exit 1
+fi
+
+# Define paths
+BINARY_SRC="{remote_temp_dir}/wg-failover"
+BINARY_DEST="/usr/local/bin/wg-failover"
+SERVICE_SRC="{remote_temp_dir}/wg-failover.service"
+SERVICE_DEST="/etc/systemd/system/wg-failover.service"
+CONFIG_SRC="{remote_temp_dir}/config.toml"
+CONFIG_DEST="/etc/wg-failover/config.toml"
+CONFIG_DIR="/etc/wg-failover"
+LOG_FILE="/var/log/wg-failover.log"
+
+# Check if service is running
+if systemctl is-active wg-failover.service >/dev/null 2>&1; then
+    echo "Stopping wg-failover service..."
+    systemctl stop wg-failover.service || true
+    pkill -f wg-failover 2>/dev/null || true
+    SERVICE_WAS_RUNNING=true
+else
+    SERVICE_WAS_RUNNING=false
+fi
+
+# Backup existing config if updating
+if [ -f "$CONFIG_DEST" ] && [ "$IS_UPDATE" = "true" ]; then
+    echo "Backing up existing configuration..."
+    cp "$CONFIG_DEST" "$CONFIG_DEST.backup" 2>/dev/null || true
+fi
+
+# Install binary
+echo "Installing binary to $BINARY_DEST..."
+cp "$BINARY_SRC" "$BINARY_DEST"
+chmod 755 "$BINARY_DEST"
+
+# Install service file
+echo "Installing systemd service..."
+cp "$SERVICE_SRC" "$SERVICE_DEST"
+chmod 644 "$SERVICE_DEST"
+systemctl daemon-reload
+
+# Install configuration
+echo "Installing configuration..."
+mkdir -p "$CONFIG_DIR"
+if [ -f "$CONFIG_SRC" ]; then
+    if [ -f "$CONFIG_DEST" ] && [ "$IS_UPDATE" = "true" ]; then
+        # Preserve existing config sections
+        echo "Preserving existing configuration settings..."
+        # Simple config preservation - in production you might want more sophisticated merging
+        if [ -f "$CONFIG_DEST.backup" ]; then
+            # For now, just keep the backup
+            echo "Existing configuration backed up to $CONFIG_DEST.backup"
+        fi
+        cp "$CONFIG_SRC" "$CONFIG_DEST"
+    else
+        cp "$CONFIG_SRC" "$CONFIG_DEST"
+    fi
+    chmod 644 "$CONFIG_DEST"
+else
+    echo "Warning: No configuration file found"
+fi
+
+# Setup logging
+echo "Setting up logging..."
+touch "$LOG_FILE"
+chmod 640 "$LOG_FILE"
+
+# Set directory permissions
+chmod 755 "$CONFIG_DIR"
+
+# Start service if it was running or if this is a new installation
+if [ "$SERVICE_WAS_RUNNING" = true ] || [ "$IS_UPDATE" = "false" ]; then
+    echo "Starting wg-failover service..."
+    systemctl start wg-failover.service || true
+    sleep 2
+fi
+
+# Enable service for automatic startup
+echo "Enabling service to start on boot..."
+systemctl enable wg-failover.service 2>/dev/null || true
+
+# Verify installation
+if systemctl is-active wg-failover.service >/dev/null 2>&1; then
+    echo "✅ WireGuard Failover service is running"
+else
+    echo "⚠️  Service is not running. Check logs with: journalctl -u wg-failover.service"
+fi
+
+echo "Cleaning up temporary files..."
+rm -rf "{remote_temp_dir}"
+
+if [ "$IS_UPDATE" = "true" ]; then
+    echo "✅ WireGuard Failover updated successfully!"
+else
+    echo "✅ WireGuard Failover installed successfully!"
 fi
 '''
     
-    # Write the sudo script to a temporary file
+    # Write the remote installation script to a temporary file
     with tempfile.NamedTemporaryFile(mode='w', suffix='.sh', delete=False) as f:
-        _ = f.write(sudo_script_content)
-        sudo_script_path = f.name
+        f.write(install_script_content)
+        remote_script_path = f.name
     
     # Make the script executable and copy it to remote server
-    _ = os.chmod(sudo_script_path, 0o755)
-    _ = subprocess.run(scp_cmd + [sudo_script_path, f"{username}@{target_ip}:{remote_temp_dir}/install_with_sudo.sh"], check=True)
-    _ = os.unlink(sudo_script_path)  # Clean up temporary file
+    os.chmod(remote_script_path, 0o755)
     
-    # Run installation on remote server with sudo
-    print_color("Running installation on remote server...", GREEN)
-    remote_cmd = f"cd {remote_temp_dir} && bash install_with_sudo.sh"
+    try:
+        _ = subprocess.run(scp_cmd + [remote_script_path, f"{username}@{target_ip}:{remote_temp_dir}/remote_install.sh"], check=True)
+        print_color("✓ Installation script prepared", GREEN)
+    except subprocess.CalledProcessError:
+        print_color("Error: Failed to copy installation script to remote server", RED)
+        os.unlink(remote_script_path)
+        sys.exit(1)
+    
+    # Clean up local temporary file
+    os.unlink(remote_script_path)
+    
+    # Execute remote installation with sudo
+    print_color("Executing remote installation...", GREEN)
+    
+    # Create a wrapper script that runs the installation with sudo
+    sudo_wrapper_content = f'''#!/bin/bash
+echo "{sudo_password}" | sudo -S bash "{remote_temp_dir}/remote_install.sh"
+'''
+    
+    with tempfile.NamedTemporaryFile(mode='w', suffix='.sh', delete=False) as f:
+        f.write(sudo_wrapper_content)
+        sudo_wrapper_path = f.name
+    
+    os.chmod(sudo_wrapper_path, 0o755)
+    
+    try:
+        _ = subprocess.run(scp_cmd + [sudo_wrapper_path, f"{username}@{target_ip}:{remote_temp_dir}/run_with_sudo.sh"], check=True)
+    except subprocess.CalledProcessError:
+        print_color("Error: Failed to copy sudo wrapper to remote server", RED)
+        os.unlink(sudo_wrapper_path)
+        sys.exit(1)
+    
+    os.unlink(sudo_wrapper_path)
+    
+    # Run the installation
+    remote_cmd = f"bash {remote_temp_dir}/run_with_sudo.sh"
     result = subprocess.run(ssh_cmd + [remote_cmd], capture_output=True, text=True)
     
+    # Output results
     if result.returncode == 0:
         if is_update:
-            print_color("Remote update completed successfully", BLUE)
+            print_color("✅ Remote update completed successfully", BLUE)
         else:
-            print_color("Remote installation completed successfully!", GREEN)
+            print_color("✅ Remote installation completed successfully!", GREEN)
         print(result.stdout)
     else:
         if is_update:
-            print_color("Error during remote update", RED)
+            print_color("❌ Error during remote update", RED)
         else:
-            print_color("Error during remote installation", RED)
+            print_color("❌ Error during remote installation", RED)
         print(result.stderr)
-        # Try to get more detailed error info
-        debug_cmd = f"cd {remote_temp_dir} && echo '{sudo_password}' | sudo -S python3 {remote_temp_dir}/install.py {install_mode}"
+        
+        # Try to get more info
+        print_color("Attempting to get more details...", YELLOW)
+        debug_cmd = f"sudo bash {remote_temp_dir}/remote_install.sh"
         debug_result = subprocess.run(ssh_cmd + [debug_cmd], capture_output=True, text=True)
         if debug_result.returncode != 0:
             print("Debug output:")
             print(debug_result.stderr)
+        
+        # Cleanup on error
+        cleanup_cmd = f"sudo rm -rf {remote_temp_dir}"
+        _ = subprocess.run(ssh_cmd + [cleanup_cmd], capture_output=True)
         sys.exit(1)
     
-    # Cleanup temporary files
-    print_color("Cleaning up temporary files...", GREEN)
-    _ = subprocess.run(ssh_cmd + ['rm', '-rf', remote_temp_dir], capture_output=True)
+    # Final cleanup
+    print_color("Performing final cleanup...", GREEN)
+    cleanup_cmd = f"sudo rm -rf {remote_temp_dir}"
+    _ = subprocess.run(ssh_cmd + [cleanup_cmd], capture_output=True)
     
     if is_update:
         print_color("=== Remote Update Complete ===", BLUE)
     else:
         print_color("=== Remote Installation Complete ===", GREEN)
     print_color(f"WireGuard Failover has been {'updated' if is_update else 'installed'} on {target_ip}", GREEN)
+    
+    # Show service status
+    print_color("\nService status on remote server:", YELLOW)
+    status_cmd = "systemctl status wg-failover.service --no-pager"
+    _ = subprocess.run(ssh_cmd + [status_cmd], capture_output=False)
 
 def main() -> None:
     parser: argparse.ArgumentParser = argparse.ArgumentParser(description='WireGuard Failover Installer')
