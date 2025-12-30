@@ -14,6 +14,7 @@ import shutil
 import subprocess
 import sys
 import tempfile
+import time
 from pathlib import Path
 
 # Color codes for terminal output
@@ -35,68 +36,10 @@ def print_color(text: str, color: str) -> None:
     print(f"{color}{text}{ENDC}")
 
 def replace_config_with_latest(source_config: str, dest_config: str) -> None:
-    """Replace configuration file with latest version, preserving user settings"""
-    if not os.path.exists(dest_config):
-        # If destination doesn't exist, just copy
-        shutil.copy(source_config, dest_config)
-        return
-    
-    # Read existing config
-    with open(dest_config, 'r') as f:
-        existing_lines = f.readlines()
-    
-    # Read new config
-    with open(source_config, 'r') as f:
-        new_lines = f.readlines()
-    
-    # Extract sections from existing config
-    existing_sections = {}
-    current_section = None
-    section_content = []
-    
-    for line in existing_lines:
-        line_stripped = line.strip()
-        if line_stripped.startswith('[') and line_stripped.endswith(']'):
-            if current_section is not None:
-                existing_sections[current_section] = section_content
-            current_section = line_stripped
-            section_content = [line]
-        elif current_section is not None:
-            section_content.append(line)
-    
-    if current_section is not None:
-        existing_sections[current_section] = section_content
-    
-    # Build new config with preserved sections
-    output_lines = []
-    current_section = None
-    section_content = []
-    
-    for line in new_lines:
-        line_stripped = line.strip()
-        if line_stripped.startswith('[') and line_stripped.endswith(']'):
-            if current_section is not None:
-                # Write preserved section content if exists, otherwise new content
-                if current_section in existing_sections:
-                    output_lines.extend(existing_sections[current_section])
-                else:
-                    output_lines.extend(section_content)
-            
-            current_section = line_stripped
-            section_content = [line]
-        elif current_section is not None:
-            section_content.append(line)
-    
-    # Handle last section
-    if current_section is not None:
-        if current_section in existing_sections:
-            output_lines.extend(existing_sections[current_section])
-        else:
-            output_lines.extend(section_content)
-    
-    # Write updated config
-    with open(dest_config, 'w') as f:
-        f.writelines(output_lines)
+    """Replace configuration file with latest version"""
+    # Simply copy the new config file
+    shutil.copy(source_config, dest_config)
+    print_color("Configuration file installed", GREEN)
 
 def check_root() -> None:
     """Check if running as root"""
@@ -332,6 +275,23 @@ def local_install(current_dir: str, is_update: bool) -> None:
     else:
         print_color("=== Installing WireGuard Failover Locally ===", GREEN)
         was_running = False
+    # Clean up any existing installation
+    cleanup_installation()
+    
+    # Build the binary first
+    print_color("Building wg-failover binary...", GREEN)
+    try:
+        subprocess.run(
+            ['cargo', 'build', '--release'],
+            cwd=current_dir,
+            capture_output=True,
+            text=True,
+            check=True
+        )
+        print_color("Binary built successfully", GREEN)
+    except subprocess.CalledProcessError as e:
+        print_color(f"Error building binary: {e}", RED)
+        sys.exit(1)
     
     # Check for required commands
     print_color("Checking dependencies...", GREEN)

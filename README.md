@@ -1,10 +1,13 @@
 # WireGuard Network Failover with Multiple IP Testing
 
+**IMPORTANT FIX**: If `route_all_traffic` setting is not working, run `./clean_reinstall.sh` for a complete clean reinstall.
+
 A Rust application for monitoring and automatically switching between multiple network interfaces to maintain continuous WireGuard VPN connectivity. This ensures your VPN connection remains active even when one of your network interfaces fails, providing maximum uptime for web services and applications.
 
 **New Features:**
 - **Multiple IP Testing**: Test connectivity to multiple IP addresses for better network health assessment
 - **Full Traffic Routing**: Option to route all traffic through selected interface, not just WireGuard peer traffic
+- **Clean Reinstall Script**: Complete removal and fresh installation script available
 
 ## Overview
 
@@ -238,7 +241,8 @@ log_level = "info"
 - **Auto-recovery**: Automatically switch back to primary when it becomes available
 - **Anti-flapping**: Minimum time between switches to prevent rapid toggling
 - **Multiple IP Testing**: Test connectivity to multiple IPs for accurate network assessment
-- **Flexible Routing**: Choose between peer-only or full traffic routing
+- **Flexible routing**: Choose between peer-only or full traffic routing
+- **Easy troubleshooting**: Built-in test scripts to verify features
 
 ## Configuration Priority
 
@@ -246,6 +250,24 @@ log_level = "info"
 2. Configuration file specified with `--config`
 3. Environment variable `WG_FAILOVER_CONFIG`
 4. Default configuration file locations
+
+## Quick Fix for Route All Traffic Issue
+
+If `route_all_traffic` setting is not working (shows `false` in logs even when set to `true` in config):
+
+```bash
+# Run clean reinstall script (recommended)
+cd /path/to/wg-failover
+sudo ./clean_reinstall.sh
+
+# OR manually rebuild and reinstall
+cd /path/to/wg-failover
+cargo build --release
+sudo cp target/release/wg-failover /usr/local/bin/wg-failover
+sudo systemctl restart wg-failover.service
+```
+
+This fixes the issue where old binaries/configs are being used.
 
 ## Troubleshooting
 
@@ -258,6 +280,7 @@ log_level = "info"
 - **Rapid interface switching**: The anti-flapping protection prevents rapid switching
 - **Route-all-traffic changes default route**: Be cautious when enabling `route_all_traffic` as it changes system's default route
 - **Multiple IP tests all failing**: Check if test IPs are reachable from your network
+- **`route_all_traffic` not working**: Run clean reinstall with `./clean_reinstall.sh` to fix old binary/config issues
 
 ### Debug Mode
 
@@ -289,6 +312,14 @@ ip route get 1.1.1.1
 # Check default route
 ip route show default
 ```
+
+## Fix Scripts
+
+The project includes troubleshooting scripts:
+
+- `clean_reinstall.sh` - Complete clean reinstall (removes all old files)
+- `test_binary_features.sh` - Test if binary has new features
+- `FIX_ROUTE_ALL_TRAFFIC.md` - Detailed fix documentation
 
 ## License
 

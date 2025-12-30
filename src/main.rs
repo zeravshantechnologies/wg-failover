@@ -379,7 +379,9 @@ fn main() -> Result<()> {
         let content = std::fs::read_to_string(&config_path)
             .context(format!("Failed to read config file {:?}", config_path))?;
         log_with_timestamp("Configuration file read successfully, parsing TOML");
-        Some(toml::from_str(&content).context("Failed to parse TOML")?)
+        let config = toml::from_str(&content).context("Failed to parse TOML")?;
+        debug!("Parsed config: {:?}", config);
+        Some(config)
     } else {
         log_with_timestamp("Configuration file does not exist, using command line arguments only");
         None
@@ -435,6 +437,7 @@ fn main() -> Result<()> {
 
     let route_all_traffic = args.route_all_traffic
         || config_file.as_ref().and_then(|c| c.route_all_traffic).unwrap_or(false);
+    debug!("Config file route_all_traffic value: {:?}", config_file.as_ref().and_then(|c| c.route_all_traffic));
     log_with_timestamp(&format!("Route all traffic: {}", route_all_traffic));
 
     log_with_timestamp("Creating application state");
