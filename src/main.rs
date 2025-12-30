@@ -1,79 +1,89 @@
 use anyhow::{Context, Result};
-use chrono::Local;
 use clap::Parser;
-use log::{error, info, debug, warn};
+use log::{debug, error, info, warn};
 use serde::Deserialize;
+use std::collections::HashMap;
 use std::path::PathBuf;
 use std::process::Command;
 use std::thread;
 use std::time::{Duration, Instant};
 
-/// WireGuard Failover - Metric-based routing manager
-#[derive(Parser, Debug, Clone)]
-#[clap(author, version, about)]
+#[derive(Parser, Debug)]
+#[command(author, version, about, long_about = None)]
 struct Args {
-    /// The IP address or hostname of the WireGuard peer
-    #[clap(short = 'i', long)]
+    /// IP address or hostname of the WireGuard peer to monitor
+    #[arg(short = 'i', long = "peer-ip")]
     peer_ip: Option<String>,
 
     /// Path to configuration file
-    #[clap(long)]
+    #[arg(short = 'c', long = "config")]
     config: Option<PathBuf>,
 
     /// Primary network interface (e.g., eth0)
-    #[clap(short = 'p', long)]
+    #[arg(short = 'p', long = "primary")]
     primary: Option<String>,
 
     /// Secondary network interface (e.g., wlan0)
-    #[clap(short = 's', long)]
+    #[arg(short = 's', long = "secondary")]
     secondary: Option<String>,
 
     /// Connectivity check interval in seconds
-    #[clap(short = 't', long)]
+    #[arg(short = 't', long = "interval")]
     interval: Option<u64>,
 
     /// Speed test interval in seconds
-    #[clap(long)]
+    #[arg(long = "speedtest-interval")]
     speedtest_interval: Option<u64>,
 
     /// Speed threshold percentage to switch to faster interface
-    #[clap(long)]
+    #[arg(long = "speed-threshold")]
     speed_threshold: Option<u8>,
+
+    /// Test IPs for connectivity checks (comma-separated)
+    #[arg(long = "test-ips")]
+    test_ips: Option<String>,
+
+    /// Route all traffic through selected interface (not just WireGuard peer)
+    #[arg(long = "route-all-traffic")]
+    route_all_traffic: bool,
 }
 
-#[derive(Debug, Deserialize, Clone)]
+#[derive(Debug, Deserialize)]
 struct Config {
     peer: Option<PeerConfig>,
     interfaces: Option<InterfaceConfig>,
     monitoring: Option<MonitoringConfig>,
+    test_ips: Option<Vec<String>>,
+    route_all_traffic: Option<bool>,
 }
 
-#[derive(Debug, Deserialize, Clone)]
+#[derive(Debug, Deserialize)]
 struct PeerConfig {
     ip: Option<String>,
 }
 
-#[derive(Debug, Deserialize, Clone)]
+#[derive(Debug, Deserialize)]
 struct InterfaceConfig {
     primary: Option<String>,
     secondary: Option<String>,
 }
 
-#[derive(Debug, Deserialize, Clone)]
+#[derive(Debug, Deserialize)]
 struct MonitoringConfig {
     interval: Option<u64>,
     speedtest_interval: Option<u64>,
     speed_threshold: Option<u8>,
 }
 
-#[derive(Debug, Clone)]
 struct AppState {
     peer_ip: String,
     primary_iface: String,
     secondary_iface: String,
+    test_ips: Vec<String>,
     check_interval: Duration,
     speed_check_interval: Duration,
     speed_threshold: u8,
+    route_all_traffic: bool,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -88,6 +98,7 @@ struct InterfaceMetrics {
     status: InterfaceStatus,
     connectivity_latency_ms: f64,
     speed_latency_ms: f64,
+    test_results: HashMap<String, bool>, // IP -> reachable
 }
 
 impl Default for InterfaceMetrics {
@@ -96,50 +107,67 @@ impl Default for InterfaceMetrics {
             status: InterfaceStatus::Unknown,
             connectivity_latency_ms: 0.0,
             speed_latency_ms: 0.0,
+            test_results: HashMap::new(),
         }
     }
 }
 
 fn log_with_timestamp(msg: &str) {
-    info!("[{}] {}", Local::now().format("%Y-%m-%d %H:%M:%S"), msg);
+    debug!("[{}] {}", chrono::Local::now().format("%Y-%m-%d %H:%M:%S"), msg);
 }
 
-/// Retrieve the default gateway for a specific interface
 fn get_gateway_for_interface(iface: &str) -> Option<String> {
-    debug!("get_gateway_for_interface called for interface: {}", iface);
+    debug!("Getting gateway for interface: {}", iface);
     
-    // Run: ip route show dev <iface>
-    debug!("Executing command: ip route show dev {}", iface);
+    // Try to get default gateway for this interface
     let output = Command::new("ip")
         .args(["route", "show", "dev", iface])
-        .output()
-        .ok()?;
+        .output();
 
-    let stdout = String::from_utf8_lossy(&output.stdout);
-    debug!("Command output (stdout): {}", stdout);
-    
-    // Look for lines like "default via 192.168.1.1 ..."
-    debug!("Parsing output lines for default gateway");
-    for line in stdout.lines() {
-        debug!("Processing line: {}", line);
-        let parts: Vec<&str> = line.split_whitespace().collect();
-        if parts.len() >= 3 && parts[0] == "default" && parts[1] == "via" {
-            let gateway = parts[2].to_string();
-            debug!("Found default gateway: {} for interface {}", gateway, iface);
-            return Some(gateway);
-        } else {
-            debug!("Line does not match default gateway pattern");
+    match output {
+        Ok(out) if out.status.success() => {
+            let stdout = String::from_utf8_lossy(&out.stdout);
+            debug!("Route output for {}: {}", iface, stdout);
+            
+            // Look for default route via gateway
+            for line in stdout.lines() {
+                if line.starts_with("default via ") {
+                    let parts: Vec<&str> = line.split_whitespace().collect();
+                    if parts.len() >= 3 {
+                        debug!("Found default gateway for {}: {}", iface, parts[2]);
+                        return Some(parts[2].to_string());
+                    }
+                }
+            }
+            
+            // If no default route, look for any route with a gateway
+            for line in stdout.lines() {
+                if line.contains(" via ") {
+                    let parts: Vec<&str> = line.split_whitespace().collect();
+                    for (i, part) in parts.iter().enumerate() {
+                        if *part == "via" && i + 1 < parts.len() {
+                            debug!("Found gateway for {}: {}", iface, parts[i + 1]);
+                            return Some(parts[i + 1].to_string());
+                        }
+                    }
+                }
+            }
+            
+            debug!("No gateway found for interface {}", iface);
+            None
+        }
+        Ok(out) => {
+            let stderr = String::from_utf8_lossy(&out.stderr);
+            debug!("Failed to get routes for {}: {}", iface, stderr);
+            None
+        }
+        Err(e) => {
+            debug!("Failed to execute ip command for {}: {}", iface, e);
+            None
         }
     }
-    
-    // If no default route specifically for this dev, try main table generic check? 
-    // Usually "ip route show dev X" is sufficient for connected interfaces with gateways.
-    // If it's a P2P link, gateway might not be needed.
-    debug!("No default gateway found for interface {}", iface);
-    None
 }
 
-/// Execute ping and return stats (success, avg_latency_ms)
 fn measure_latency(iface: &str, target: &str, count: u8, timeout: u8) -> (bool, f64) {
     debug!("measure_latency called: iface={}, target={}, count={}, timeout={}", iface, target, count, timeout);
     
@@ -205,9 +233,44 @@ fn measure_latency(iface: &str, target: &str, count: u8, timeout: u8) -> (bool, 
     }
 }
 
-/// Update the route to the peer IP through the specified interface
-fn update_route(peer_ip: &str, iface: &str, gateway: Option<&String>) -> Result<()> {
-    debug!("update_route called: peer_ip={}, iface={}, gateway={:?}", peer_ip, iface, gateway);
+fn test_connectivity_multiple_ips(iface: &str, test_ips: &[String]) -> (bool, f64, HashMap<String, bool>) {
+    debug!("Testing connectivity for interface {} to {} IPs", iface, test_ips.len());
+    
+    let mut successful_tests = 0;
+    let mut total_latency = 0.0;
+    let mut test_results = HashMap::new();
+    
+    for ip in test_ips {
+        debug!("Testing connectivity to {} via {}", ip, iface);
+        let (success, latency) = measure_latency(iface, ip, 1, 2);
+        test_results.insert(ip.clone(), success);
+        
+        if success {
+            successful_tests += 1;
+            total_latency += latency;
+            debug!("Successfully reached {} via {} with latency {:.1}ms", ip, iface, latency);
+        } else {
+            debug!("Failed to reach {} via {}", ip, iface);
+        }
+    }
+    
+    let avg_latency = if successful_tests > 0 {
+        total_latency / successful_tests as f64
+    } else {
+        0.0
+    };
+    
+    // Consider interface working if at least 50% of tests succeed
+    let interface_working = successful_tests > 0 && (successful_tests as f32 / test_ips.len() as f32) >= 0.5;
+    
+    debug!("Interface {}: {} successful tests out of {}, average latency: {:.1}ms, working: {}", 
+           iface, successful_tests, test_ips.len(), avg_latency, interface_working);
+    
+    (interface_working, avg_latency, test_results)
+}
+
+fn update_route_for_peer(peer_ip: &str, iface: &str, gateway: Option<&String>) -> Result<()> {
+    debug!("update_route_for_peer called: peer_ip={}, iface={}, gateway={:?}", peer_ip, iface, gateway);
     
     // Command: ip route replace <peer_ip> [via <gateway>] dev <iface>
     let mut cmd = Command::new("ip");
@@ -221,10 +284,6 @@ fn update_route(peer_ip: &str, iface: &str, gateway: Option<&String>) -> Result<
     }
     
     cmd.arg("dev").arg(iface);
-    
-    // We can set a metric if we want, but since we are "replacing", 
-    // we effectively choose this interface as the active one for this destination.
-    // To be cleaner, we can set metric 100.
     cmd.arg("metric").arg("100");
     
     let cmd_str = format!("{:?}", cmd);
@@ -252,6 +311,51 @@ fn update_route(peer_ip: &str, iface: &str, gateway: Option<&String>) -> Result<
     }
     
     debug!("Updated route for {} via {} (gw: {:?})", peer_ip, iface, gateway);
+    Ok(())
+}
+
+fn update_default_route(iface: &str, gateway: Option<&String>) -> Result<()> {
+    debug!("update_default_route called: iface={}, gateway={:?}", iface, gateway);
+    
+    // Command: ip route replace default [via <gateway>] dev <iface>
+    let mut cmd = Command::new("ip");
+    cmd.arg("route").arg("replace").arg("default");
+    
+    if let Some(gw) = gateway {
+        debug!("Adding gateway to default route: via {}", gw);
+        cmd.arg("via").arg(gw);
+    } else {
+        debug!("No gateway specified for default route");
+    }
+    
+    cmd.arg("dev").arg(iface);
+    cmd.arg("metric").arg("100");
+    
+    let cmd_str = format!("{:?}", cmd);
+    debug!("Executing default route command: {}", cmd_str);
+
+    let output = cmd.output().context("Failed to execute ip route command")?;
+    
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        debug!("Default route command failed with status: {}", output.status);
+        debug!("Default route command stderr: {}", stderr);
+        debug!("Default route command stdout: {}", stdout);
+        return Err(anyhow::anyhow!("ip route default failed: {}", stderr));
+    }
+    
+    debug!("Default route command succeeded with status: {}", output.status);
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    if !stdout.is_empty() {
+        debug!("Default route command stdout: {}", stdout);
+    }
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    if !stderr.is_empty() {
+        debug!("Default route command stderr: {}", stderr);
+    }
+    
+    debug!("Updated default route via {} (gw: {:?})", iface, gateway);
     Ok(())
 }
 
@@ -313,20 +417,44 @@ fn main() -> Result<()> {
         .unwrap_or(20);
     log_with_timestamp(&format!("Speed threshold determined: {}%", speed_threshold));
 
+    // Get test IPs from args or config, default to common public DNS servers
+    let test_ips = if let Some(ips_str) = args.test_ips {
+        ips_str.split(',').map(|s| s.trim().to_string()).collect()
+    } else if let Some(ips) = config_file.as_ref().and_then(|c| c.test_ips.as_ref()) {
+        ips.clone()
+    } else {
+        // Default test IPs: common public DNS servers
+        vec![
+            "8.8.8.8".to_string(),      // Google DNS
+            "1.1.1.1".to_string(),      // Cloudflare DNS
+            "208.67.222.222".to_string(), // OpenDNS
+            peer_ip.clone(),             // Include the WireGuard peer
+        ]
+    };
+    log_with_timestamp(&format!("Test IPs determined: {:?}", test_ips));
+
+    let route_all_traffic = args.route_all_traffic
+        || config_file.as_ref().and_then(|c| c.route_all_traffic).unwrap_or(false);
+    log_with_timestamp(&format!("Route all traffic: {}", route_all_traffic));
+
     log_with_timestamp("Creating application state");
     let state = AppState {
         peer_ip,
         primary_iface,
         secondary_iface,
+        test_ips,
         check_interval: Duration::from_secs(interval_secs),
         speed_check_interval: Duration::from_secs(speed_interval_secs),
         speed_threshold,
+        route_all_traffic,
     };
     log_with_timestamp("Application state created successfully");
 
-    log_with_timestamp(&format!("Starting WireGuard Failover (Simple Metric Mode)"));
+    log_with_timestamp("Starting WireGuard Failover (Multiple IP Test Mode)");
     info!("Peer: {}", state.peer_ip);
     info!("Primary: {}, Secondary: {}", state.primary_iface, state.secondary_iface);
+    info!("Test IPs: {:?}", state.test_ips);
+    info!("Route all traffic: {}", state.route_all_traffic);
     info!("Intervals - Check: {:?}, Speed: {:?}", state.check_interval, state.speed_check_interval);
     log_with_timestamp("Initialization complete, entering main loop");
 
@@ -359,28 +487,33 @@ fn main() -> Result<()> {
         log_with_timestamp(&format!("Primary gateway: {:?}, Secondary gateway: {:?}", primary_gw, secondary_gw));
 
         // ----------------------------------------
-        // 2. Connectivity Check (Frequent)
+        // 2. Connectivity Check (Frequent) - Multiple IPs
         // ----------------------------------------
-        // We ping the Peer IP through specific interfaces to test reachability.
-        // NOTE: If the interface doesn't have a route to peer, ping -I usually works if gateway is on-link or default exists.
-        
-        log_with_timestamp("Starting connectivity checks");
+        log_with_timestamp("Starting connectivity checks with multiple IPs");
         log_with_timestamp(&format!("Checking connectivity via primary interface: {}", state.primary_iface));
-        let (p_ok, p_lat) = measure_latency(&state.primary_iface, &state.peer_ip, 1, 2);
-        log_with_timestamp(&format!("Primary interface connectivity result: success={}, latency={:.1}ms", p_ok, p_lat));
+        let (p_ok, p_lat, p_results) = test_connectivity_multiple_ips(&state.primary_iface, &state.test_ips);
+        log_with_timestamp(&format!("Primary interface connectivity result: success={}, average latency={:.1}ms", p_ok, p_lat));
         
         log_with_timestamp(&format!("Checking connectivity via secondary interface: {}", state.secondary_iface));
-        let (s_ok, s_lat) = measure_latency(&state.secondary_iface, &state.peer_ip, 1, 2);
-        log_with_timestamp(&format!("Secondary interface connectivity result: success={}, latency={:.1}ms", s_ok, s_lat));
+        let (s_ok, s_lat, s_results) = test_connectivity_multiple_ips(&state.secondary_iface, &state.test_ips);
+        log_with_timestamp(&format!("Secondary interface connectivity result: success={}, average latency={:.1}ms", s_ok, s_lat));
 
         log_with_timestamp("Updating metrics based on connectivity results");
         primary_metrics.status = if p_ok { InterfaceStatus::Working } else { InterfaceStatus::Failed };
         primary_metrics.connectivity_latency_ms = p_lat;
+        primary_metrics.test_results = p_results;
         log_with_timestamp(&format!("Primary metrics updated: status={:?}, latency={:.1}ms", primary_metrics.status, primary_metrics.connectivity_latency_ms));
         
         secondary_metrics.status = if s_ok { InterfaceStatus::Working } else { InterfaceStatus::Failed };
         secondary_metrics.connectivity_latency_ms = s_lat;
+        secondary_metrics.test_results = s_results;
         log_with_timestamp(&format!("Secondary metrics updated: status={:?}, latency={:.1}ms", secondary_metrics.status, secondary_metrics.connectivity_latency_ms));
+
+        // Log detailed test results
+        for (ip, p_reachable) in &primary_metrics.test_results {
+            let s_reachable = secondary_metrics.test_results.get(ip).unwrap_or(&false);
+            debug!("IP {}: Primary={}, Secondary={}", ip, p_reachable, s_reachable);
+        }
 
         // ----------------------------------------
         // 3. Speed Check (Periodic)
@@ -394,10 +527,10 @@ fn main() -> Result<()> {
             log_with_timestamp("Speed check interval reached, performing speed/quality check...");
             if primary_metrics.status == InterfaceStatus::Working && secondary_metrics.status == InterfaceStatus::Working {
                 log_with_timestamp("Both interfaces working, running detailed latency measurements");
-                // Run heavier ping
-                log_with_timestamp("Measuring detailed latency on primary interface");
+                // Run heavier ping to peer IP for speed comparison
+                log_with_timestamp("Measuring detailed latency on primary interface to peer");
                 let (_, p_avg) = measure_latency(&state.primary_iface, &state.peer_ip, 5, 5);
-                log_with_timestamp("Measuring detailed latency on secondary interface");
+                log_with_timestamp("Measuring detailed latency on secondary interface to peer");
                 let (_, s_avg) = measure_latency(&state.secondary_iface, &state.peer_ip, 5, 5);
                 
                 primary_metrics.speed_latency_ms = p_avg;
@@ -490,21 +623,30 @@ fn main() -> Result<()> {
                 },
             };
 
-            // Force update if it's been a while? Or just on change.
-            // Also need to handle if gateway changed.
-            // For simplicity, we update if interface changed OR if we just want to ensure consistency.
-            // Let's only update on change to avoid log spam, but maybe retry if previous attempt failed?
-            
             if should_update {
-                log_with_timestamp(&format!("Routing WireGuard Peer {} via {}", state.peer_ip, target_iface));
-                match update_route(&state.peer_ip, target_iface, target_gw.as_ref()) {
-                    Ok(_) => {
-                        current_active_interface = Some(target_iface.clone());
-                        log_with_timestamp("Route updated successfully.");
-                    },
-                    Err(e) => {
-                        error!("Failed to update route: {}", e);
-                        log_with_timestamp(&format!("Route update failed with error: {}", e));
+                if state.route_all_traffic {
+                    log_with_timestamp(&format!("Routing ALL traffic via {}", target_iface));
+                    match update_default_route(target_iface, target_gw.as_ref()) {
+                        Ok(_) => {
+                            current_active_interface = Some(target_iface.clone());
+                            log_with_timestamp("Default route updated successfully.");
+                        },
+                        Err(e) => {
+                            error!("Failed to update default route: {}", e);
+                            log_with_timestamp(&format!("Default route update failed with error: {}", e));
+                        }
+                    }
+                } else {
+                    log_with_timestamp(&format!("Routing WireGuard Peer {} via {}", state.peer_ip, target_iface));
+                    match update_route_for_peer(&state.peer_ip, target_iface, target_gw.as_ref()) {
+                        Ok(_) => {
+                            current_active_interface = Some(target_iface.clone());
+                            log_with_timestamp("Peer route updated successfully.");
+                        },
+                        Err(e) => {
+                            error!("Failed to update peer route: {}", e);
+                            log_with_timestamp(&format!("Peer route update failed with error: {}", e));
+                        }
                     }
                 }
             } else {

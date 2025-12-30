@@ -13,6 +13,8 @@
 # - Speed-based optimization to use faster connections
 # - Anti-flapping protection (minimum time between switches)
 # - Auto-recovery to primary when both interfaces are available
+# - Multiple IP testing for better connectivity assessment
+# - Option to route all traffic or just WireGuard peer traffic
 
 # WireGuard Peer Configuration
 # ----------------------------
@@ -43,13 +45,35 @@ interface = "wg0"
 # recover to this interface when it becomes available.
 # Example: primary = "eth0" (Ethernet)
 # Example: primary = "enp0s31f6" (specific Ethernet port)
-primary = "enp0s31f6"
+primary = "eno3"
 
 # Secondary network interface (fallback interface).
 # This interface will be used when the primary interface loses connectivity.
 # Example: secondary = "wlan0" (WiFi)
 # Example: secondary = "wwp0s20u4i6" (cellular modem)
-secondary = "enp0s20f0u1"
+secondary = "eno4"
+
+# Test IP Configuration
+# ---------------------
+# List of IP addresses to test for connectivity.
+# The system will test connectivity to all these IPs through each interface
+# to determine overall network health. At least 50% of tests must succeed
+# for an interface to be considered working.
+test_ips = [
+    "10.9.0.1",
+    "8.8.8.8",        # Google DNS
+    "1.1.1.1",        # Cloudflare DNS
+    "208.67.222.222", # OpenDNS
+    "206.189.140.174", # WireGuard peer (included automatically)
+]
+
+# Routing Configuration
+# ---------------------
+# Controls whether to route all traffic or just WireGuard peer traffic
+# through the selected interface.
+# When true: All traffic (0.0.0.0/0) will be routed through the selected interface
+# When false: Only traffic to the WireGuard peer will be routed through the selected interface
+route_all_traffic = true
 
 # Monitoring Configuration
 # ------------------------

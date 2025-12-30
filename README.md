@@ -1,6 +1,10 @@
-# WireGuard Network Failover
+# WireGuard Network Failover with Multiple IP Testing
 
 A Rust application for monitoring and automatically switching between multiple network interfaces to maintain continuous WireGuard VPN connectivity. This ensures your VPN connection remains active even when one of your network interfaces fails, providing maximum uptime for web services and applications.
+
+**New Features:**
+- **Multiple IP Testing**: Test connectivity to multiple IP addresses for better network health assessment
+- **Full Traffic Routing**: Option to route all traffic through selected interface, not just WireGuard peer traffic
 
 ## Overview
 
@@ -13,6 +17,8 @@ This tool solves the problem of maintaining uninterrupted VPN connectivity when 
 - **Configurable thresholds**: Set minimum speed improvement percentage before switching
 - **Anti-flapping protection**: Minimum time between switches to prevent rapid toggling
 - **Dual monitoring**: Quick connectivity checks + periodic speed tests
+- **Multiple IP testing**: Test connectivity to multiple IPs for accurate network health assessment
+- **Flexible routing**: Route all traffic or just WireGuard peer traffic through selected interface
 - **Flexible configuration**: Command-line arguments or configuration file
 - **Detailed logging**: Comprehensive monitoring and troubleshooting with failover counters
 - **Systemd service integration**: Easy deployment as a system service
@@ -111,19 +117,15 @@ sudo systemctl enable wg-failover.service
 # Basic usage with CLI arguments
 sudo wg-failover \
   --peer-ip 192.168.1.1 \
-  --wg-interface wg0 \
   --primary eth0 \
   --secondary wlan0
 
 # Full options with speed testing
 sudo wg-failover \
   --peer-ip 192.168.1.1 \
-  --wg-interface wg0 \
   --primary eth0 \
   --secondary wlan0 \
   --interval 30 \
-  --count 2 \
-  --timeout 2 \
   --speedtest-interval 3600 \
   --speed-threshold 35
 
@@ -132,6 +134,23 @@ sudo wg-failover --config /etc/wg-failover/config.toml
 
 # Debug logging
 sudo RUST_LOG=debug wg-failover --config /etc/wg-failover/config.toml
+
+# New: Multiple IP testing
+sudo wg-failover \
+  --peer-ip 192.168.1.1 \
+  --primary eth0 \
+  --secondary wlan0 \
+  --test-ips "8.8.8.8,1.1.1.1,192.168.1.1" \
+  --interval 30
+
+# New: Route all traffic through selected interface
+sudo wg-failover \
+  --peer-ip 192.168.1.1 \
+  --primary eth0 \
+  --secondary wlan0 \
+  --test-ips "8.8.8.8,1.1.1.1" \
+  --route-all-traffic \
+  --interval 30
 ```
 
 ### Configuration File
@@ -143,15 +162,6 @@ Create `/etc/wg-failover/config.toml`:
 [peer]
 # Public IP address or hostname of the WireGuard peer to ping
 ip = "206.189.140.174"
-# Number of ping attempts
-count = 2
-# Ping timeout in seconds
-timeout = 2
-
-# WireGuard interface settings
-[wireguard]
-# Name of the WireGuard interface
-interface = "wg0"
 
 # Network interfaces
 [interfaces]
@@ -159,6 +169,21 @@ interface = "wg0"
 primary = "enp2s0f0u2"
 # Secondary network interface (fallback)
 secondary = "enp10s0"
+
+# Test IPs for connectivity checks
+# List of IP addresses to test for connectivity
+# At least 50% of tests must succeed for interface to be considered working
+test_ips = [
+    "8.8.8.8",        # Google DNS
+    "1.1.1.1",        # Cloudflare DNS
+    "208.67.222.222", # OpenDNS
+    "206.189.140.174", # WireGuard peer (included automatically)
+]
+
+# Route all traffic through selected interface
+# When true: All traffic (0.0.0.0/0) will be routed through selected interface
+# When false: Only traffic to WireGuard peer will be routed through selected interface
+route_all_traffic = false
 
 # Monitoring settings
 [monitoring]
@@ -176,37 +201,44 @@ log_level = "info"
 
 - `--config <CONFIG>`: Path to configuration file
 - `-i, --peer-ip <PEER_IP>`: IP address or hostname of the WireGuard peer
-- `-w, --wg-interface <WG_INTERFACE>`: WireGuard interface name (e.g., wg0)
 - `-p, --primary <PRIMARY>`: Primary network interface (e.g., eth0)
 - `-s, --secondary <SECONDARY>`: Secondary network interface (e.g., wlan0)
 - `-t, --interval <INTERVAL>`: Connectivity check interval in seconds [default: 30]
-- `-n, --count <COUNT>`: Number of ping attempts [default: 2]
-- `--timeout <TIMEOUT>`: Ping timeout in seconds [default: 2]
 - `--speedtest-interval <SPEEDTEST_INTERVAL>`: Speed test interval in seconds [default: 3600]
 - `--speed-threshold <SPEED_THRESHOLD>`: Speed threshold percentage to switch to faster interface [default: 35]
+- `--test-ips <TEST_IPS>`: Comma-separated list of IPs to test for connectivity [default: 8.8.8.8,1.1.1.1,208.67.222.222,peer-ip]
+- `--route-all-traffic`: Route all traffic through selected interface, not just WireGuard peer traffic
 
 ## How It Works
 
-### Dual Monitoring System
+### Enhanced Monitoring System
 
-1. **Connectivity Monitoring (Fast)**
-   - Checks interface connectivity every 30 seconds (configurable)
+1. **Multiple IP Connectivity Monitoring (Fast)**
+   - Tests connectivity to multiple IP addresses (configurable list)
+   - Interface considered working if at least 50% of tests succeed
    - Immediately switches to backup interface if primary fails
    - Automatically switches back to primary when it recovers
-   - Ensures continuous VPN connectivity with zero downtime
+   - Provides more accurate network health assessment than single IP testing
 
 2. **Speed Optimization (Periodic)**
    - Performs speed tests every hour (configurable)
-   - Compares download speeds between interfaces
-   - Switches to faster interface if it's at least 35% faster (configurable)
+   - Compares latency between interfaces using detailed ping tests
+   - Switches to faster interface if it's at least configured percentage faster
    - Always prefers primary interface unless secondary is significantly faster
+
+3. **Flexible Routing Options**
+   - **Peer-only routing**: Only route traffic to WireGuard peer through selected interface
+   - **Full traffic routing**: Route all system traffic (0.0.0.0/0) through selected interface
+   - Configurable via command line or configuration file
 
 ### Operation Modes
 
 - **Automatic Failover Mode**: When primary interface loses connectivity, immediately switch to secondary
 - **Speed Optimization Mode**: When both interfaces are active, use the faster one
 - **Auto-recovery**: Automatically switch back to primary when it becomes available
-- **Anti-flapping**: Minimum 30-second delay between switches to prevent rapid toggling
+- **Anti-flapping**: Minimum time between switches to prevent rapid toggling
+- **Multiple IP Testing**: Test connectivity to multiple IPs for accurate network assessment
+- **Flexible Routing**: Choose between peer-only or full traffic routing
 
 ## Configuration Priority
 
@@ -223,7 +255,9 @@ log_level = "info"
 - **Interface not found**: Verify interface names with `ip link show`
 - **Speed test fails**: Install `speedtest-cli` package
 - **No connectivity after switch**: Check gateway detection and routing tables
-- **Rapid interface switching**: The anti-flapping protection prevents switches within 30 seconds of each other
+- **Rapid interface switching**: The anti-flapping protection prevents rapid switching
+- **Route-all-traffic changes default route**: Be cautious when enabling `route_all_traffic` as it changes system's default route
+- **Multiple IP tests all failing**: Check if test IPs are reachable from your network
 
 ### Debug Mode
 
@@ -242,8 +276,18 @@ ip link show
 # Check current routing
 ip route show
 
-# Test interface connectivity
+# Test interface connectivity to multiple IPs
 ping -I eth0 8.8.8.8
+ping -I eth0 1.1.1.1
+ping -I wlan0 8.8.8.8
+ping -I wlan0 1.1.1.1
+
+# Check specific routes
+ip route get 8.8.8.8
+ip route get 1.1.1.1
+
+# Check default route
+ip route show default
 ```
 
 ## License
