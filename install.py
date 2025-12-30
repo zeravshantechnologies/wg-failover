@@ -14,8 +14,6 @@ import shutil
 import subprocess
 import sys
 import tempfile
-import time
-from pathlib import Path
 
 # Color codes for terminal output
 BLUE = '\033[94m'
@@ -207,7 +205,7 @@ def cleanup_installation() -> bool:
     print_color("=== Cleaning up WireGuard Failover installation ===", BLUE)
     
     # Stop the service if running
-    was_running = stop_service()
+    _ = stop_service()
     
     # Disable the service
     _ = disable_service()
@@ -255,136 +253,137 @@ def cleanup_installation() -> bool:
 
 def local_install(current_dir: str, is_update: bool) -> None:
     """Perform local installation or update"""
-    if is_update:
-        print_color("=== Updating WireGuard Failover ===", BLUE)
-        installed_version = get_installed_version()
-        current_version = get_current_version()
-        
-        if installed_version and current_version:
-            print_color(f"Updating from version {installed_version} to {current_version}", BLUE)
-        elif installed_version:
-            print_color(f"Updating existing installation (current version: {installed_version})", BLUE)
-        else:
-            print_color("Updating existing installation", BLUE)
-        
-        # Backup configuration before update
-        _ = backup_config()
-        
-        # Stop service before update
-        was_running: bool = stop_service()
-    else:
-        print_color("=== Installing WireGuard Failover Locally ===", GREEN)
-        was_running = False
-    # Clean up any existing installation
-    cleanup_installation()
+    print_color("=== Installing WireGuard Failover Locally ===", GREEN)
     
-    # Build the binary first
-    print_color("Building wg-failover binary...", GREEN)
+    # Step 1: Execute cleanup commands on target system
+    print_color("Stopping wg-failover service...", YELLOW)
     try:
-        subprocess.run(
-            ['cargo', 'build', '--release'],
-            cwd=current_dir,
-            capture_output=True,
-            text=True,
-            check=True
-        )
-        print_color("Binary built successfully", GREEN)
-    except subprocess.CalledProcessError as e:
-        print_color(f"Error building binary: {e}", RED)
-        sys.exit(1)
+        subprocess.run(['sudo', 'systemctl', 'stop', 'wg-failover.service'], check=True)
+        print_color("✓ Service stopped successfully", GREEN)
+    except subprocess.CalledProcessError:
+        print_color("Warning: Could not stop service (may not be installed)", YELLOW)
     
-    # Check for required commands
-    print_color("Checking dependencies...", GREEN)
-    required_commands = ['ip', 'systemctl', 'nmcli']
-    missing_commands: list[str] = []
-    for cmd in required_commands:
-        if not shutil.which(cmd):
-            missing_commands.append(cmd)
+    print_color("Disabling wg-failover service...", YELLOW)
+    try:
+        subprocess.run(['sudo', 'systemctl', 'disable', 'wg-failover.service'], check=True)
+        print_color("✓ Service disabled successfully", GREEN)
+    except subprocess.CalledProcessError:
+        print_color("Warning: Could not disable service (may not be installed)", YELLOW)
     
-    if missing_commands:
-        print_color(f"Warning: Missing commands: {', '.join(missing_commands)}", YELLOW)
-        print_color("Some features may not work properly", YELLOW)
+    print_color("Removing log file...", YELLOW)
+    try:
+        if os.path.exists(LOG_PATH):
+            os.remove(LOG_PATH)
+            print_color(f"✓ Removed log file: {LOG_PATH}", GREEN)
+    except Exception as e:
+        print_color(f"Warning: Could not remove log file: {e}", YELLOW)
     
-    # Clean up any existing installation
-    cleanup_installation()
+    print_color("Removing binary...", YELLOW)
+    try:
+        if os.path.exists(BINARY_PATH):
+            os.remove(BINARY_PATH)
+            print_color(f"✓ Removed binary: {BINARY_PATH}", GREEN)
+    except Exception as e:
+        print_color(f"Warning: Could not remove binary: {e}", YELLOW)
     
-    # Install binary
-    binary_src = os.path.join(current_dir, 'target', 'release', 'wg-failover')
-    if not os.path.exists(binary_src):
-        binary_src = os.path.join(current_dir, 'wg-failover')
+    print_color("Removing configuration...", YELLOW)
+    try:
+        if os.path.exists(CONFIG_PATH):
+            os.remove(CONFIG_PATH)
+            print_color(f"✓ Removed configuration: {CONFIG_PATH}", GREEN)
+    except Exception as e:
+        print_color(f"Warning: Could not remove configuration: {e}", YELLOW)
     
-    if not os.path.exists(binary_src):
-        print_color(f"Error: wg-failover executable not found in {current_dir}/target/release/ or {current_dir}/", RED)
-        if is_update:
-            restore_config()
-        sys.exit(1)
+    print_color("Removing service file...", YELLOW)
+    try:
+        if os.path.exists(SERVICE_PATH):
+            os.remove(SERVICE_PATH)
+            print_color(f"✓ Removed service file: {SERVICE_PATH}", GREEN)
+    except Exception as e:
+        print_color(f"Warning: Could not remove service file: {e}", YELLOW)
     
-    print_color(f"Installing binary to {BINARY_PATH}...", GREEN)
-    _ = shutil.copy(binary_src, BINARY_PATH)
-    os.chmod(BINARY_PATH, 0o755)
-    print_color("Binary installed successfully", GREEN)
+    # Reload systemd daemon
+    try:
+        subprocess.run(['sudo', 'systemctl', 'daemon-reload'], check=True)
+        print_color("✓ Systemd daemon reloaded", GREEN)
+    except Exception as e:
+        print_color(f"Warning: Could not reload systemd daemon: {e}", YELLOW)
     
-    # Install service file
-    service_src = os.path.join(current_dir, 'wg-failover.service')
-    if not os.path.exists(service_src):
-        print_color(f"Error: wg-failover.service file not found in {current_dir}", RED)
-        if is_update:
-            restore_config()
-        sys.exit(1)
+    # Step 2: Copy files from current directory to target system
+    print_color("Copying files to target system...", GREEN)
     
-    print_color(f"Installing systemd service to {SERVICE_PATH}...", GREEN)
-    _ = shutil.copy(service_src, SERVICE_PATH)
-    os.chmod(SERVICE_PATH, 0o644)
-    _ = subprocess.run(['systemctl', 'daemon-reload'], check=True)
-    print_color("Service installed successfully", GREEN)
-    
-    # Install configuration - always replace with latest version
+    # Copy config file
     config_src = os.path.join(current_dir, 'config.toml')
     if os.path.exists(config_src):
         print_color(f"Installing configuration to {CONFIG_PATH}...", GREEN)
         os.makedirs(CONFIG_DIR, mode=0o755, exist_ok=True)
-        replace_config_with_latest(config_src, CONFIG_PATH)
+        _ = shutil.copy(config_src, CONFIG_PATH)
+        os.chmod(CONFIG_PATH, 0o644)
+        print_color("✓ Configuration installed successfully", GREEN)
     else:
         print_color(f"Warning: config.toml file not found in {current_dir}", YELLOW)
-        print_color("You'll need to create a configuration file manually", YELLOW)
+    
+    # Copy service file
+    service_src = os.path.join(current_dir, 'wg-failover.service')
+    if os.path.exists(service_src):
+        print_color(f"Installing systemd service to {SERVICE_PATH}...", GREEN)
+        _ = shutil.copy(service_src, SERVICE_PATH)
+        os.chmod(SERVICE_PATH, 0o644)
+        print_color("✓ Service file installed successfully", GREEN)
+    else:
+        print_color(f"Error: wg-failover.service file not found in {current_dir}", RED)
+        sys.exit(1)
+    
+    # Copy binary
+    binary_src = os.path.join(current_dir, 'target', 'release', 'wg-failover')
+    if not os.path.exists(binary_src):
+        binary_src = os.path.join(current_dir, 'wg-failover')
+    
+    if os.path.exists(binary_src):
+        print_color(f"Installing binary to {BINARY_PATH}...", GREEN)
+        _ = shutil.copy(binary_src, BINARY_PATH)
+        os.chmod(BINARY_PATH, 0o755)
+        print_color("✓ Binary installed successfully", GREEN)
+    else:
+        print_color(f"Error: wg-failover executable not found in {current_dir}/target/release/ or {current_dir}/", RED)
+        sys.exit(1)
     
     # Setup logging
     print_color("Setting up logging...", GREEN)
-    Path(LOG_PATH).touch(mode=0o640, exist_ok=True)
-    print_color(f"Log file created at {LOG_PATH}", GREEN)
-    
-    # Detect interfaces
-    print_color("Available network interfaces:", GREEN)
     try:
-        result = subprocess.run(['ip', '-br', 'link', 'show'], capture_output=True, text=True, check=True)
-        interfaces = [line.split()[0] for line in result.stdout.splitlines() if 'lo' not in line]
-        for iface in interfaces:
-            print(f"  - {iface}")
-    except subprocess.CalledProcessError:
-        print_color("Warning: Could not detect network interfaces", YELLOW)
+        with open(LOG_PATH, 'a'):
+            pass
+        os.chmod(LOG_PATH, 0o640)
+        print_color(f"Log file created at {LOG_PATH}", GREEN)
+    except Exception as e:
+        print_color(f"Warning: Could not create log file: {e}", YELLOW)
     
-    # Set permissions
-    os.chmod(CONFIG_DIR, 0o755)
-    if os.path.exists(CONFIG_PATH) and os.path.getsize(CONFIG_PATH) > 0:
-        os.chmod(CONFIG_PATH, 0o644)
-    if os.path.exists(SERVICE_PATH):
-        os.chmod(SERVICE_PATH, 0o644)
-    if os.path.exists(BINARY_PATH):
-        os.chmod(BINARY_PATH, 0o755)
+    # Reload systemd daemon after copying service file
+    try:
+        subprocess.run(['sudo', 'systemctl', 'daemon-reload'], check=True)
+        print_color("✓ Systemd daemon reloaded", GREEN)
+    except Exception as e:
+        print_color(f"Warning: Could not reload systemd daemon: {e}", YELLOW)
     
-    # Start service if it was running or if this is a new installation
-    if was_running or not is_update:
-        _ = start_service()
+    # Step 3: Enable and start service
+    print_color("Enabling wg-failover service...", GREEN)
+    try:
+        subprocess.run(['sudo', 'systemctl', 'enable', 'wg-failover.service'], check=True)
+        print_color("✓ Service enabled successfully", GREEN)
+    except subprocess.CalledProcessError as e:
+        print_color(f"Error enabling service: {e}", RED)
+        sys.exit(1)
     
-    # Enable service for automatic startup
-    _ = enable_service()
+    print_color("Starting wg-failover service...", GREEN)
+    try:
+        subprocess.run(['sudo', 'systemctl', 'start', 'wg-failover.service'], check=True)
+        print_color("✓ Service started successfully", GREEN)
+    except subprocess.CalledProcessError as e:
+        print_color(f"Error starting service: {e}", RED)
+        sys.exit(1)
     
     print()
-    if is_update:
-        print_color("=== Update Complete ===", BLUE)
-    else:
-        print_color("=== Installation Complete ===", GREEN)
-    
+    print_color("=== Installation Complete ===", GREEN)
     print_color("Service commands:", YELLOW)
     print("  sudo systemctl start wg-failover.service")
     print("  sudo systemctl stop wg-failover.service")
@@ -397,20 +396,18 @@ def local_install(current_dir: str, is_update: bool) -> None:
     print(f"  sudo tail -f {LOG_PATH}")
     print()
     print_color(f"Configuration file location: {CONFIG_PATH}", GREEN)
-    if is_update:
-        print_color("Your existing configuration has been preserved", GREEN)
-    else:
-        print_color("Please edit the configuration file to match your setup!", YELLOW)
+    print_color("Please edit the configuration file to match your setup!", YELLOW)
 
 def remote_install(target_ip: str, private_key: str, username: str, sudo_password: str, is_update: bool) -> None:
     """Perform remote installation or update via SSH without copying install script"""
     if is_update:
-        print_color(f"=== Updating WireGuard Failover Remotely on {target_ip} ===", BLUE)
+        print_color("=== Updating WireGuard Failover Remotely on {} ===".format(target_ip), BLUE)
     else:
-        print_color(f"=== Installing WireGuard Failover Remotely on {target_ip} ===", GREEN)
+        print_color("=== Installing WireGuard Failover Remotely on {} ===".format(target_ip), GREEN)
     
     # Create SSH command prefix
     ssh_cmd: list[str] = ["ssh", "-i", private_key, f"{username}@{target_ip}"]
+    ssh_cmd_tty: list[str] = ["ssh", "-t", "-i", private_key, f"{username}@{target_ip}"]  # For commands requiring TTY
     scp_cmd: list[str] = ["scp", "-i", private_key]
     
     # Check if we can connect
@@ -654,7 +651,7 @@ echo "{sudo_password}" | sudo -S bash "{remote_temp_dir}/remote_install.sh"
     
     # Run the installation
     remote_cmd = f"bash {remote_temp_dir}/run_with_sudo.sh"
-    result = subprocess.run(ssh_cmd + [remote_cmd], capture_output=True, text=True)
+    result = subprocess.run(ssh_cmd_tty + [remote_cmd], capture_output=True, text=True)
     
     # Output results
     if result.returncode == 0:
@@ -673,7 +670,7 @@ echo "{sudo_password}" | sudo -S bash "{remote_temp_dir}/remote_install.sh"
         # Try to get more info
         print_color("Attempting to get more details...", YELLOW)
         debug_cmd = f"sudo bash {remote_temp_dir}/remote_install.sh"
-        debug_result = subprocess.run(ssh_cmd + [debug_cmd], capture_output=True, text=True)
+        debug_result = subprocess.run(ssh_cmd_tty + [debug_cmd], capture_output=True, text=True)
         if debug_result.returncode != 0:
             print("Debug output:")
             print(debug_result.stderr)
@@ -686,7 +683,7 @@ echo "{sudo_password}" | sudo -S bash "{remote_temp_dir}/remote_install.sh"
     # Final cleanup
     print_color("Performing final cleanup...", GREEN)
     cleanup_cmd = f"sudo rm -rf {remote_temp_dir}"
-    _ = subprocess.run(ssh_cmd + [cleanup_cmd], capture_output=True)
+    _ = subprocess.run(ssh_cmd_tty + [cleanup_cmd], capture_output=True)
     
     if is_update:
         print_color("=== Remote Update Complete ===", BLUE)
@@ -697,7 +694,7 @@ echo "{sudo_password}" | sudo -S bash "{remote_temp_dir}/remote_install.sh"
     # Show service status
     print_color("\nService status on remote server:", YELLOW)
     status_cmd = "systemctl status wg-failover.service --no-pager"
-    _ = subprocess.run(ssh_cmd + [status_cmd], capture_output=False)
+    _ = subprocess.run(ssh_cmd_tty + [status_cmd], capture_output=False)
 
 def main() -> None:
     parser: argparse.ArgumentParser = argparse.ArgumentParser(description='WireGuard Failover Installer')
